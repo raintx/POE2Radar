@@ -1,0 +1,169 @@
+using System.Numerics;
+using POE2Radar.Core.Game;
+using POE2Radar.Core.Pathfinding;
+using Vortice.Direct2D1;
+using Vortice.DirectWrite;
+using Vortice.Mathematics;
+using NumVec2 = System.Numerics.Vector2;
+using GameVec2 = POE2Radar.Core.Game.Vector2;
+
+namespace POE2Radar.Overlay;
+
+/// <summary>
+/// PoE2 radar overlay. When the large map is open, draws the walkable-terrain bitmap, entity
+/// dots (enemies, NPCs, etc.), and the player blip, projected player-centered onto the map with
+/// the same isometric math the PoE Radar plugin uses. Projection scale/offset are calibratable
+/// at runtime (see <see cref="RadarApp"/>).
+/// </summary>
+public sealed class OverlayRenderer : IDisposable
+{
+    private static readonly Color4 ColPlayer  = new(0.30f, 0.95f, 1.00f, 1.00f);
+    private static readonly Color4 ColMonster = new(1.00f, 0.20f, 0.20f, 0.95f);
+    private static readonly Color4 ColNpc     = new(1.00f, 0.85f, 0.20f, 0.95f);
+    private static readonly Color4 ColChest   = new(0.95f, 0.55f, 0.10f, 0.95f);
+    private static readonly Color4 ColTrans   = new(0.40f, 1.00f, 0.60f, 0.95f);
+    private static readonly Color4 ColObject  = new(0.55f, 0.75f, 1.00f, 0.70f);
+    private static readonly Color4 ColOther   = new(0.70f, 0.70f, 0.70f, 0.60f);
+    private static readonly Color4 ColText    = new(1f, 1f, 1f, 1f);
+    private static readonly Color4 ColPanel   = new(0.05f, 0.05f, 0.05f, 0.78f);
+    private static readonly Color4 ColLandmark = new(0.95f, 0.35f, 0.95f, 1f); // magenta — static tile landmarks
+
+    private readonly OverlayWindow _window;
+    private TerrainBitmap? _terrain;
+
+    private ID2D1SolidColorBrush? _bPlayer, _bMonster, _bNpc, _bChest, _bTrans, _bObject, _bOther, _bText, _bPanel, _bLandmark;
+    private IDWriteTextFormat? _tf;
+    private bool _ready;
+
+    public OverlayRenderer(OverlayWindow window) { _window = window; }
+
+    private void EnsureResources()
+    {
+        if (_ready) return;
+        var rt = _window.RenderTarget;
+        _bPlayer  = rt.CreateSolidColorBrush(ColPlayer);
+        _bMonster = rt.CreateSolidColorBrush(ColMonster);
+        _bNpc     = rt.CreateSolidColorBrush(ColNpc);
+        _bChest   = rt.CreateSolidColorBrush(ColChest);
+        _bTrans   = rt.CreateSolidColorBrush(ColTrans);
+        _bObject  = rt.CreateSolidColorBrush(ColObject);
+        _bOther   = rt.CreateSolidColorBrush(ColOther);
+        _bText    = rt.CreateSolidColorBrush(ColText);
+        _bPanel   = rt.CreateSolidColorBrush(ColPanel);
+        _bLandmark = rt.CreateSolidColorBrush(ColLandmark);
+        _tf = _window.DWriteFactory.CreateTextFormat("Consolas", null, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, 12f, "en-us");
+        _ready = true;
+    }
+
+    public void Render(RenderContext ctx)
+    {
+        if (!_window.IsValid) return;
+        EnsureResources();
+        var rt = _window.RenderTarget;
+        rt.BeginDraw();
+        rt.Clear(new Color4(0f, 0f, 0f, 0f));
+        rt.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+        try
+        {
+            DrawStatus(rt, ctx);
+            if (ctx is { InGame: true, Map.IsVisible: true })
+                DrawMap(rt, ctx);
+        }
+        finally { rt.EndDraw(); }
+        _window.Present();
+    }
+
+    private void DrawStatus(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        var line = !ctx.InGame
+            ? "POE2Radar: waiting for in-game…"
+            : $"POE2Radar  HP {ctx.HpPct:F0}%  MP {ctx.ManaPct:F0}%  flask:{ctx.FlaskNote}"
+              + (ctx.Map.IsVisible
+                  ? $"  | map zoom={ctx.Map.Zoom:F2} scale={ctx.ScaleMul:F2} off=({ctx.OffsetX:F0},{ctx.OffsetY:F0}) ents={ctx.Entities.Count}"
+                  : "");
+        rt.FillRectangle(new Vortice.RawRectF(6, 6, 6 + line.Length * 7.3f + 10, 26), _bPanel!);
+        rt.DrawText(line, _tf!, new Rect(12, 8, 1200, 22), _bText!, DrawTextOptions.Clip);
+    }
+
+    private void DrawMap(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        // MapCenter = window center + DefaultShift(0,-20) + Shift + manual offset.
+        var center = new NumVec2(
+            ctx.WindowWidth  * 0.5f + ctx.Map.ShiftX + ctx.OffsetX,
+            ctx.WindowHeight * 0.5f + ctx.Map.ShiftY - 20f + ctx.OffsetY);
+        var scale = ctx.Map.Zoom * (ctx.WindowHeight / 677f) * ctx.ScaleMul;
+        var player = ctx.PlayerGrid;
+
+        // Terrain bitmap, projected via the same affine grid→screen transform.
+        if (ctx.Terrain is { } t)
+        {
+            _terrain ??= new TerrainBitmap(rt);
+            _terrain.EnsureBuiltRaw(t.Walkable, t.Width, t.Height, ctx.AreaHash, inTransition: false);
+            if (_terrain.Bitmap is { } bmp)
+            {
+                var p00 = Project(new NumVec2(0, 0), player, center, scale);
+                var p10 = Project(new NumVec2(t.Width, 0), player, center, scale);
+                var p01 = Project(new NumVec2(0, t.Height), player, center, scale);
+                var ex = (p10 - p00) / t.Width;
+                var ey = (p01 - p00) / t.Height;
+                var prev = rt.Transform;
+                rt.Transform = new Matrix3x2(ex.X, ex.Y, ey.X, ey.Y, p00.X, p00.Y);
+                rt.DrawBitmap(bmp, 1f, BitmapInterpolationMode.Linear, new Rect(0, 0, t.Width, t.Height));
+                rt.Transform = prev;
+            }
+        }
+
+        // Entity dots. Props (Object/Other) and dead monsters are filtered out — they're the
+        // clutter; the API still serves them for troubleshooting. Game-flagged POIs (entities
+        // with a MinimapIcon component) always draw with a white ring, even if their category
+        // would otherwise be filtered (waypoints, checkpoints, shrines, …).
+        foreach (var e in ctx.Entities)
+        {
+            ID2D1SolidColorBrush brush; float r;
+            switch (e.Category)
+            {
+                case Poe2Live.EntityCategory.Monster:
+                    if (!e.IsAlive) continue;            // skip corpses
+                    brush = _bMonster!; r = 3.0f; break;
+                case Poe2Live.EntityCategory.Player:     brush = _bPlayer!; r = 3.0f; break;
+                case Poe2Live.EntityCategory.Npc:        brush = _bNpc!;    r = 3.5f; break;
+                case Poe2Live.EntityCategory.Chest:      brush = _bChest!;  r = 3.0f; break;
+                case Poe2Live.EntityCategory.Transition: brush = _bTrans!;  r = 3.5f; break;
+                default:
+                    if (!e.Poi) continue;                // Object/Other → skip unless a POI
+                    brush = _bObject!; r = 3.0f; break;
+            }
+            var p = Project(new NumVec2(e.Grid.X, e.Grid.Y), player, center, scale);
+            rt.FillEllipse(new Ellipse(p, r, r), brush);
+            if (e.Poi) rt.DrawEllipse(new Ellipse(p, r + 2.5f, r + 2.5f), _bText!, 1.4f); // POI ring
+        }
+
+        // Static tile landmarks (boss arena, treasure, …) — diamond + label at the group centroid.
+        foreach (var lm in ctx.Landmarks)
+        {
+            var p = Project(new NumVec2(lm.Center.X, lm.Center.Y), player, center, scale);
+            var d = 5f;
+            var diamond = new[] { new NumVec2(p.X, p.Y - d), new NumVec2(p.X + d, p.Y), new NumVec2(p.X, p.Y + d), new NumVec2(p.X - d, p.Y) };
+            for (var i = 0; i < 4; i++) rt.DrawLine(diamond[i], diamond[(i + 1) % 4], _bLandmark!, 1.6f);
+            rt.DrawText(lm.Name, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bLandmark!, DrawTextOptions.Clip);
+        }
+
+        // Player blip on top.
+        rt.FillEllipse(new Ellipse(center, 5f, 5f), _bPlayer!);
+    }
+
+    private static NumVec2 Project(NumVec2 cell, NumVec2 player, NumVec2 center, float scale)
+    {
+        var d = cell - player;
+        var md = MapProjection.GridDeltaToMapDelta(new GameVec2 { X = d.X, Y = d.Y }, scale);
+        return new NumVec2(center.X + md.X, center.Y + md.Y);
+    }
+
+    public void Dispose()
+    {
+        _bPlayer?.Dispose(); _bMonster?.Dispose(); _bNpc?.Dispose(); _bChest?.Dispose();
+        _bTrans?.Dispose(); _bObject?.Dispose(); _bOther?.Dispose(); _bText?.Dispose(); _bPanel?.Dispose(); _bLandmark?.Dispose();
+        _tf?.Dispose();
+        _terrain?.Dispose();
+    }
+}
