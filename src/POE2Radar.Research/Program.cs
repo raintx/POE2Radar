@@ -704,19 +704,7 @@ static int RunValueScan(MemoryReader reader, int hp, int? mana)
     Console.WriteLine($"{matches.Count} candidate Life component(s):");
     foreach (var m in matches)
         Console.WriteLine($"  Life @ 0x{m.LifeComponentAddress:X16}  owner(entity) @ 0x{m.OwnerAddress:X16}");
-
-    // Back-walk the first candidate to IngameData so the resolved chain can be eyeballed
-    // against the offset table.
-    var ownerAddr = matches[0].OwnerAddress;
-    Console.Write("Back-walking from player entity to IngameData... ");
-    var hits = AnchorBackWalker.FindIngameDataFromPlayer(reader, ownerAddr);
-    if (hits.Count == 0)
-    {
-        Console.WriteLine("none.");
-        return 1;
-    }
-    foreach (var h in hits)
-        Console.WriteLine($"\n  IngameData @ 0x{h.IngameDataAddress:X16}");
+    Console.WriteLine("Use --entity <owner> to walk the entity, or --chain to resolve roots via AOB.");
     return 0;
 }
 

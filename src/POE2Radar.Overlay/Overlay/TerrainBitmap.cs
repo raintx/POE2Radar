@@ -1,6 +1,4 @@
 using System.Runtime.InteropServices;
-using POE2Radar.Core.Pathfinding;
-using POE2Radar.Core.Snapshot;
 using Vortice.DCommon;
 using Vortice.Direct2D1;
 using Vortice.DXGI;
@@ -33,42 +31,9 @@ public sealed class TerrainBitmap : IDisposable
     public uint AreaHash => _builtForAreaHash;
 
     /// <summary>
-    /// Build (or rebuild) the bitmap from the given navigation grid. Cheap if width, height,
-    /// AND <paramref name="areaHash"/> all match the cached version. <paramref name="inTransition"/>
-    /// forces an immediate drop regardless of hash — needed because PoE briefly leaves the
-    /// previous area's hash readable while transitioning, so hash-only keying can't tell us
-    /// the area is changing.
-    /// </summary>
-    public void EnsureBuilt(NavGrid nav, uint areaHash, bool inTransition)
-    {
-        // Drop the stale bitmap whenever we know the area is changing OR the hash already
-        // shifted. Drawing "loading…" for a few frames beats showing the previous map's
-        // terrain over the new area.
-        if (_bitmap is not null && (inTransition || areaHash != _builtForAreaHash))
-        {
-            _bitmap.Dispose();
-            _bitmap = null;
-            _builtForAreaHash = 0;
-        }
-
-        if (inTransition || !nav.IsAvailable) return;
-        if (_bitmap is not null
-            && nav.Width  == _builtForWidth
-            && nav.Height == _builtForHeight
-            && areaHash   == _builtForAreaHash) return;
-
-        var w = nav.Width;
-        var h = nav.Height;
-        var walkable = new byte[w * h];
-        for (var y = 0; y < h; y++)
-            for (var x = 0; x < w; x++)
-                walkable[y * w + x] = (byte)nav.Walkable(x, y);
-        BuildFrom(walkable, w, h, areaHash);
-    }
-
-    /// <summary>
-    /// Build (or rebuild) from a flat 0/1 walkable array (PoE2 path — no NavGrid). Cheap when
-    /// dimensions + <paramref name="areaHash"/> match the cached bitmap.
+    /// Build (or rebuild) from a flat 0/1 walkable array. Cheap when dimensions +
+    /// <paramref name="areaHash"/> match the cached bitmap. <paramref name="inTransition"/> forces
+    /// an immediate drop (the area's hash may briefly persist while a zone is loading).
     /// </summary>
     public void EnsureBuiltRaw(byte[] walkable, int width, int height, uint areaHash, bool inTransition)
     {

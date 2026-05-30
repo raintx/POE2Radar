@@ -5,7 +5,7 @@ namespace POE2Radar.Core.Game;
 /// <summary>
 /// Search-and-validate utility: given the player's known HP / ES / Mana values, find every memory
 /// address in the target process whose surrounding bytes are consistent with a <see cref="VitalStruct"/>
-/// and a parent <see cref="KnownOffsets.LifeComponent"/>. The first candidate where all three match
+/// and a parent <see cref="Poe2.Life"/>. The first candidate where all three match
 /// is, with overwhelming probability, the player's actual Life component.
 ///
 /// This is what we use to validate the offset table from <c>community-offsets.md</c> WITHOUT yet
@@ -91,7 +91,7 @@ public static class LifeValidator
                         // Candidate Current is at (regionBase + offset + i). VitalStruct.Current is at +0x30.
                         // So candidate VitalStruct base is (candidate Current) - 0x30.
                         var vitalCurrentAddr = regionBase + (nint)(offset + i);
-                        var vitalBase = vitalCurrentAddr - KnownOffsets.Vital.Current;
+                        var vitalBase = vitalCurrentAddr - Poe2.Vital.Current;
                         TryValidateCandidate(reader, vitalBase, expectedHpCurrent, expectedManaCurrent, expectedEsMax, matches);
                     }
 
@@ -120,16 +120,16 @@ public static class LifeValidator
     {
         // candidateHealthAddr is the hypothetical VitalStruct base for Health.
         // LifeComponent address = healthAddr - 0x178 (LifeComponent.Health offset).
-        var lifeComponentAddr = candidateHealthAddr - KnownOffsets.LifeComponent.Health;
+        var lifeComponentAddr = candidateHealthAddr - Poe2.Life.Health;
 
         if (!reader.TryReadStruct<VitalStruct>(candidateHealthAddr, out var health)) return;
         if (!health.LooksValid()) return;
         if (health.Current != expectedHp) return; // re-check after struct read
 
-        if (!reader.TryReadStruct<VitalStruct>(lifeComponentAddr + KnownOffsets.LifeComponent.Mana, out var mana)) return;
+        if (!reader.TryReadStruct<VitalStruct>(lifeComponentAddr + Poe2.Life.Mana, out var mana)) return;
         if (!mana.LooksValid()) return;
 
-        if (!reader.TryReadStruct<VitalStruct>(lifeComponentAddr + KnownOffsets.LifeComponent.EnergyShield, out var es)) return;
+        if (!reader.TryReadStruct<VitalStruct>(lifeComponentAddr + Poe2.Life.EnergyShield, out var es)) return;
         // ES can legitimately have Max=0 (no ES gear), so don't filter by LooksLikeVital here â€” accept any plausible struct.
         // But ES.Current must be in [0, ES.Max].
         if (es.Max < 0 || es.Current < 0 || es.Current > es.Max + 1) return;
@@ -138,7 +138,7 @@ public static class LifeValidator
         if (expectedEsMax.HasValue && es.Max != expectedEsMax.Value) return;
 
         // Read Owner pointer â€” should be a valid-looking pointer (high bits sane).
-        var ownerAddr = reader.TryReadStruct<nint>(lifeComponentAddr + KnownOffsets.LifeComponent.Owner, out var o)
+        var ownerAddr = reader.TryReadStruct<nint>(lifeComponentAddr + Poe2.Life.Owner, out var o)
             ? o
             : 0;
 

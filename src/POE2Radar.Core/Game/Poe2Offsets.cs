@@ -113,6 +113,7 @@ public static class Poe2
     /// <summary>Life — ✓ validated live (442/442 HP, 271 mana, 186/186 ES).</summary>
     public static class Life
     {
+        public const int Owner        = 0x008; // ComponentHeader.EntityPtr (back-pointer to entity)
         public const int Health       = 0x1A8; // ✓ VitalStruct
         public const int Mana         = 0x1F8; // ✓ VitalStruct
         public const int EnergyShield = 0x230; // ✓ VitalStruct
