@@ -34,6 +34,9 @@ public sealed class OverlayRenderer : IDisposable
     private readonly OverlayWindow _window;
     private TerrainBitmap? _terrain;
 
+    private enum Icon { Circle, Triangle, Star, Diamond, Plus, Square }
+    private ID2D1PathGeometry? _geoTriangle, _geoStar, _geoDiamond, _geoPlus;
+
     private ID2D1SolidColorBrush? _bPlayer, _bMonster, _bNpc, _bChest, _bTrans, _bObject, _bOther, _bText, _bPanel, _bLandmark;
     private ID2D1SolidColorBrush? _bMagic, _bRare, _bUnique;
     private IDWriteTextFormat? _tf;
@@ -147,6 +150,71 @@ public sealed class OverlayRenderer : IDisposable
         }
     }
 
+    private void EnsureShapeGeometries()
+    {
+        if (_geoTriangle is not null) return;
+        var factory = (ID2D1Factory)_window.RenderTarget.Factory;
+
+        _geoTriangle = factory.CreatePathGeometry();
+        using (var s = _geoTriangle.Open())
+        {
+            s.BeginFigure(new NumVec2(0f, -1f), FigureBegin.Filled);
+            s.AddLine(new NumVec2(0.866f, 0.5f)); s.AddLine(new NumVec2(-0.866f, 0.5f));
+            s.EndFigure(FigureEnd.Closed); s.Close();
+        }
+        _geoDiamond = factory.CreatePathGeometry();
+        using (var s = _geoDiamond.Open())
+        {
+            s.BeginFigure(new NumVec2(0f, -1f), FigureBegin.Filled);
+            s.AddLine(new NumVec2(1f, 0f)); s.AddLine(new NumVec2(0f, 1f)); s.AddLine(new NumVec2(-1f, 0f));
+            s.EndFigure(FigureEnd.Closed); s.Close();
+        }
+        _geoStar = factory.CreatePathGeometry();
+        using (var s = _geoStar.Open())
+        {
+            const float inner = 0.42f; var first = true;
+            for (var i = 0; i < 10; i++)
+            {
+                var a = -MathF.PI / 2f + i * MathF.PI / 5f;
+                var rr = (i & 1) == 0 ? 1f : inner;
+                var pt = new NumVec2(MathF.Cos(a) * rr, MathF.Sin(a) * rr);
+                if (first) { s.BeginFigure(pt, FigureBegin.Filled); first = false; } else s.AddLine(pt);
+            }
+            s.EndFigure(FigureEnd.Closed); s.Close();
+        }
+        _geoPlus = factory.CreatePathGeometry();
+        using (var s = _geoPlus.Open())
+        {
+            const float a = 0.36f;
+            var pts = new[] {
+                new NumVec2(-a,-1f), new NumVec2(a,-1f), new NumVec2(a,-a), new NumVec2(1f,-a),
+                new NumVec2(1f,a), new NumVec2(a,a), new NumVec2(a,1f), new NumVec2(-a,1f),
+                new NumVec2(-a,a), new NumVec2(-1f,a), new NumVec2(-1f,-a), new NumVec2(-a,-a) };
+            s.BeginFigure(pts[0], FigureBegin.Filled);
+            for (var i = 1; i < pts.Length; i++) s.AddLine(pts[i]);
+            s.EndFigure(FigureEnd.Closed); s.Close();
+        }
+    }
+
+    /// <summary>Draw a categorical icon at screen point p with radius r. Circle/Square use D2D
+    /// primitives; the rest stamp a cached unit geometry via a per-call scale+translate transform.</summary>
+    private void DrawIcon(ID2D1RenderTarget rt, Icon icon, NumVec2 p, float r, ID2D1SolidColorBrush brush, bool filled)
+    {
+        if (icon == Icon.Circle) { if (filled) rt.FillEllipse(new Ellipse(p, r, r), brush); else rt.DrawEllipse(new Ellipse(p, r, r), brush, 1.2f); return; }
+        if (icon == Icon.Square)
+        {
+            var h = r * 0.9f; var rect = new Vortice.RawRectF(p.X - h, p.Y - h, p.X + h, p.Y + h);
+            if (filled) rt.FillRectangle(rect, brush); else rt.DrawRectangle(rect, brush, 1.5f); return;
+        }
+        EnsureShapeGeometries();
+        var geo = icon switch { Icon.Triangle => _geoTriangle, Icon.Star => _geoStar, Icon.Diamond => _geoDiamond, Icon.Plus => _geoPlus, _ => null };
+        if (geo is null) return;
+        var prev = rt.Transform;
+        rt.Transform = new Matrix3x2(r, 0f, 0f, r, p.X, p.Y);
+        if (filled) rt.FillGeometry(geo, brush); else rt.DrawGeometry(geo, brush, 1.5f / r);
+        rt.Transform = prev;
+    }
+
     private void DrawMap(ID2D1RenderTarget rt, RenderContext ctx)
     {
         // MapCenter = window center + DefaultShift(0,-20) + Shift + manual offset.
@@ -181,34 +249,33 @@ public sealed class OverlayRenderer : IDisposable
         // would otherwise be filtered (waypoints, checkpoints, shrines, …).
         foreach (var e in ctx.Entities)
         {
-            ID2D1SolidColorBrush brush; float r;
+            ID2D1SolidColorBrush brush; float r; Icon icon;
             switch (e.Category)
             {
                 case Poe2Live.EntityCategory.Monster:
                     if (!e.IsAlive) continue;            // skip corpses
-                    (brush, r) = e.Rarity switch          // color + size by rarity
+                    (brush, r, icon) = e.Rarity switch    // distinct shape + color by rarity
                     {
-                        Poe2Live.Rarity.Unique => (_bUnique!, 5.5f),
-                        Poe2Live.Rarity.Rare   => (_bRare!, 4.2f),
-                        Poe2Live.Rarity.Magic  => (_bMagic!, 3.3f),
-                        _                      => (_bMonster!, 2.8f),
+                        Poe2Live.Rarity.Unique => (_bUnique!, 6.5f, Icon.Star),
+                        Poe2Live.Rarity.Rare   => (_bRare!, 5.5f, Icon.Triangle),
+                        Poe2Live.Rarity.Magic  => (_bMagic!, 3.4f, Icon.Diamond),
+                        _                      => (_bMonster!, 2.6f, Icon.Circle),
                     };
                     break;
-                case Poe2Live.EntityCategory.Player:     brush = _bPlayer!; r = 3.0f; break;
-                case Poe2Live.EntityCategory.Npc:        brush = _bNpc!;    r = 3.5f; break;
+                case Poe2Live.EntityCategory.Player:     (brush, r, icon) = (_bPlayer!, 3.0f, Icon.Circle); break;
+                case Poe2Live.EntityCategory.Npc:        (brush, r, icon) = (_bNpc!, 4.0f, Icon.Plus); break;
                 case Poe2Live.EntityCategory.Chest:
                     if (e.Opened) continue;                                   // skip used chests
                     if (e.Rarity is not (Poe2Live.Rarity.Rare or Poe2Live.Rarity.Unique)) continue; // rare+ only
-                    (brush, r) = e.Rarity == Poe2Live.Rarity.Unique ? (_bUnique!, 4.5f) : (_bRare!, 4.0f);
+                    (brush, r, icon) = (e.Rarity == Poe2Live.Rarity.Unique ? _bUnique! : _bRare!, 5.0f, Icon.Square);
                     break;
-                case Poe2Live.EntityCategory.Transition: brush = _bTrans!;  r = 3.5f; break;
+                case Poe2Live.EntityCategory.Transition: (brush, r, icon) = (_bTrans!, 4.5f, Icon.Diamond); break;
                 default:
                     if (!e.Poi) continue;                // Object/Other → skip unless a POI
-                    brush = _bObject!; r = 3.0f; break;
+                    (brush, r, icon) = (_bObject!, 3.0f, Icon.Circle); break;
             }
             var p = Project(new NumVec2(e.Grid.X, e.Grid.Y), player, center, scale);
-            rt.FillEllipse(new Ellipse(p, r, r), brush);
-            if (e.Poi) rt.DrawEllipse(new Ellipse(p, r + 2.5f, r + 2.5f), _bText!, 1.4f); // POI ring
+            DrawIcon(rt, icon, p, r, brush, filled: true);
         }
 
         // Static tile landmarks (boss arena, treasure, …) — diamond + label at the group centroid.
@@ -237,6 +304,7 @@ public sealed class OverlayRenderer : IDisposable
         _bPlayer?.Dispose(); _bMonster?.Dispose(); _bNpc?.Dispose(); _bChest?.Dispose();
         _bTrans?.Dispose(); _bObject?.Dispose(); _bOther?.Dispose(); _bText?.Dispose(); _bPanel?.Dispose(); _bLandmark?.Dispose();
         _bMagic?.Dispose(); _bRare?.Dispose(); _bUnique?.Dispose();
+        _geoTriangle?.Dispose(); _geoStar?.Dispose(); _geoDiamond?.Dispose(); _geoPlus?.Dispose();
         _tf?.Dispose();
         _terrain?.Dispose();
     }
