@@ -114,6 +114,7 @@ public sealed class RadarApp : IDisposable
 
         var ctx = new RenderContext(
             InGame: inGame,
+            Active: _gameHwnd != 0 && GetForegroundWindow() == _gameHwnd,
             WindowWidth: _window.Width,
             WindowHeight: _window.Height,
             PlayerGrid: player,

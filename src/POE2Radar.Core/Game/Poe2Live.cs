@@ -19,6 +19,7 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, nint> _renderAddr = new();   // entity → Render component
     private readonly Dictionary<nint, nint> _lifeAddr = new();     // entity → Life component (0 = none)
     private readonly Dictionary<nint, nint> _posAddr = new();      // entity → Positioned component (0 = none)
+    private readonly Dictionary<nint, nint> _ompAddr = new();      // entity → ObjectMagicProperties (0 = none)
     private readonly Dictionary<nint, EntityCategory> _category = new();
     private readonly Dictionary<nint, string> _meta = new();
     private readonly Dictionary<nint, bool> _hasIcon = new();      // entity has a MinimapIcon component (game POI)
@@ -32,9 +33,12 @@ public sealed class Poe2Live
 
     public enum EntityCategory { Player, Monster, Npc, Chest, Transition, Object, Other }
 
+    /// <summary>Monster rarity from ObjectMagicProperties.Rarity. NonMonster = not applicable.</summary>
+    public enum Rarity { Normal = 0, Magic = 1, Rare = 2, Unique = 3, NonMonster = -1 }
+
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, EntityCategory Category, string Metadata,
-        int HpCur, int HpMax, bool Poi, byte Reaction)
+        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity)
     {
         /// <summary>Monsters are "alive" only with positive HP; non-life entities are always shown.</summary>
         public bool IsAlive => HpMax <= 0 || HpCur > 0;
@@ -131,7 +135,8 @@ public sealed class Poe2Live
     {
         if (areaInstance != _entCacheKey)
         {
-            _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _category.Clear(); _meta.Clear(); _hasIcon.Clear();
+            _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear();
+            _category.Clear(); _meta.Clear(); _hasIcon.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -159,12 +164,17 @@ public sealed class Poe2Live
             if (grid is not { } g) continue;
 
             var cat = Categorize(entity);
-            // Read HP for things that can die (monsters/players); cheap via cached Life addr.
+            // Read HP + rarity for things that can die (monsters/players); cheap via cached addrs.
             int hpCur = 0, hpMax = 0;
+            var rarity = Rarity.NonMonster;
             if (cat is EntityCategory.Monster or EntityCategory.Player)
+            {
                 (hpCur, hpMax) = ReadHp(entity);
+                if (cat == EntityCategory.Monster) rarity = ReadRarity(entity);
+            }
 
-            dots.Add(new EntityDot(id, entity, g, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax, HasIcon(entity), ReadReaction(entity)));
+            dots.Add(new EntityDot(id, entity, g, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax,
+                HasIcon(entity), ReadReaction(entity), rarity));
         }
         return dots;
     }
@@ -176,6 +186,19 @@ public sealed class Poe2Live
         has = ResolveComponent(entity, "MinimapIcon") != 0;
         _hasIcon[entity] = has;
         return has;
+    }
+
+    private Rarity ReadRarity(nint entity)
+    {
+        if (!_ompAddr.TryGetValue(entity, out var omp))
+        {
+            omp = ResolveComponent(entity, "ObjectMagicProperties");
+            _ompAddr[entity] = omp;
+        }
+        if (omp == 0) return Rarity.Normal;
+        if (!_reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var r) || r is < 0 or > 3)
+            return Rarity.Normal;
+        return (Rarity)r;
     }
 
     private byte ReadReaction(nint entity)

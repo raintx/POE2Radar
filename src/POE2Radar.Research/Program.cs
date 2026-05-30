@@ -45,6 +45,9 @@ if (HasFlag(args, "--watch"))
 if (HasFlag(args, "--tiles"))
     return RunTiles(process, reader);
 
+if (HasFlag(args, "--rarity"))
+    return RunRarity(process, reader);
+
 if (TryGetHexArg(args, "--find") is { } needle)
     return RunFindPointer(reader, needle, TryGetHexArg(args, "--near"), TryGetIntArg(args, "--window") ?? 0x2000);
 
@@ -174,6 +177,82 @@ static int RunFindPointer(MemoryReader reader, nint needle, nint? near, int wind
         }
     }
     Console.WriteLine($"{hits} hit(s){(hits >= 60 ? " (capped)" : "")}.");
+    return 0;
+}
+
+// ── Rarity: find the ObjectMagicProperties rarity offset. Walks all alive monsters, resolves
+// each one's ObjectMagicProperties component, and for every 4-byte offset records the set of
+// values seen. The rarity field is the offset whose values are all small (0..3) AND vary across
+// the sample (white/magic/rare/unique). Run while standing in a mixed pack.
+static int RunRarity(ProcessHandle process, MemoryReader reader)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    reader.TryReadStruct<int>(ai + Poe2.AreaInstance.AwakeEntities + 8, out var size);
+    if (head == 0 || size <= 0) { Console.Error.WriteLine("no awake entities"); return 1; }
+
+    const int span = 0x180;
+    var perOffset = new Dictionary<int, HashSet<int>>();
+    var sampled = 0;
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    var buf = new byte[span];
+    while (queue.Count > 0 && visited.Count < 200000 && sampled < 200)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        var entity = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+        if (!ReadEntityMetadata(reader, entity).Contains("/Monsters/", StringComparison.Ordinal)) continue;
+
+        var omp = ResolveComponentAddr(reader, entity, "ObjectMagicProperties");
+        if (omp == 0 || reader.TryReadBytes(omp, buf) != span) continue;
+        sampled++;
+        for (var o = 0; o + 4 <= span; o += 4)
+        {
+            var v = BitConverter.ToInt32(buf, o);
+            (perOffset.TryGetValue(o, out var s) ? s : perOffset[o] = new HashSet<int>()).Add(v);
+        }
+    }
+    Console.WriteLine($"sampled {sampled} monsters' ObjectMagicProperties.");
+    Console.WriteLine("offsets whose values are all in 0..3 and vary (rarity candidates):");
+    foreach (var (o, set) in perOffset.OrderBy(k => k.Key))
+        if (set.Count > 1 && set.All(v => v is >= 0 and <= 3))
+            Console.WriteLine($"  +0x{o:X3}: values {{{string.Join(",", set.OrderBy(x => x))}}}");
+    Console.WriteLine("\n(also showing offsets all in 0..4 with >=3 distinct, in case Unique/special tiers present:)");
+    foreach (var (o, set) in perOffset.OrderBy(k => k.Key))
+        if (set.Count >= 3 && set.All(v => v is >= 0 and <= 6))
+            Console.WriteLine($"  +0x{o:X3}: values {{{string.Join(",", set.OrderBy(x => x))}}}");
+    return 0;
+}
+
+// Resolve a component address by name (same StdBucket walk as Poe2Live, inline for probes).
+static nint ResolveComponentAddr(MemoryReader reader, nint entity, string name)
+{
+    var details = SafePtr(reader, entity + Poe2.Entity.EntityDetailsPtr);
+    if (details == 0) return 0;
+    var lookup = SafePtr(reader, details + Poe2.EntityDetails.ComponentLookUpPtr);
+    if (lookup == 0) return 0;
+    if (!reader.TryReadStruct<POE2Radar.Core.Game.StdVector>(entity + Poe2.Entity.ComponentList, out var cl)) return 0;
+    var compCount = ((long)cl.Last - (long)cl.First) / 8;
+    if (compCount is <= 0 or > 256) return 0;
+    var bFirst = SafePtr(reader, lookup + Poe2.ComponentLookUp.NameAndIndexBucket);
+    if (!reader.TryReadStruct<nint>(lookup + Poe2.ComponentLookUp.NameAndIndexBucket + 8, out var bLast)) return 0;
+    var entries = ((long)bLast - (long)bFirst) / Poe2.ComponentLookUp.EntryStride;
+    if (bFirst == 0 || entries is <= 0 or > 256) return 0;
+    for (long i = 0; i < entries; i++)
+    {
+        var e = bFirst + (nint)(i * Poe2.ComponentLookUp.EntryStride);
+        if (!reader.TryReadStruct<int>(e + 8, out var index) || index < 0 || index >= compCount) continue;
+        if (reader.ReadStringUtf8(SafePtr(reader, e), 40) != name) continue;
+        return SafePtr(reader, cl.First + (nint)(index * 8));
+    }
     return 0;
 }
 

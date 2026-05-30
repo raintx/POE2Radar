@@ -18,7 +18,10 @@ namespace POE2Radar.Overlay;
 public sealed class OverlayRenderer : IDisposable
 {
     private static readonly Color4 ColPlayer  = new(0.30f, 0.95f, 1.00f, 1.00f);
-    private static readonly Color4 ColMonster = new(1.00f, 0.20f, 0.20f, 0.95f);
+    private static readonly Color4 ColMonster = new(1.00f, 0.20f, 0.20f, 0.95f); // Normal
+    private static readonly Color4 ColMagic   = new(0.45f, 0.65f, 1.00f, 0.97f); // Magic (blue)
+    private static readonly Color4 ColRare    = new(1.00f, 0.85f, 0.15f, 1.00f); // Rare (gold)
+    private static readonly Color4 ColUnique  = new(1.00f, 0.45f, 0.00f, 1.00f); // Unique (orange)
     private static readonly Color4 ColNpc     = new(1.00f, 0.85f, 0.20f, 0.95f);
     private static readonly Color4 ColChest   = new(0.95f, 0.55f, 0.10f, 0.95f);
     private static readonly Color4 ColTrans   = new(0.40f, 1.00f, 0.60f, 0.95f);
@@ -32,6 +35,7 @@ public sealed class OverlayRenderer : IDisposable
     private TerrainBitmap? _terrain;
 
     private ID2D1SolidColorBrush? _bPlayer, _bMonster, _bNpc, _bChest, _bTrans, _bObject, _bOther, _bText, _bPanel, _bLandmark;
+    private ID2D1SolidColorBrush? _bMagic, _bRare, _bUnique;
     private IDWriteTextFormat? _tf;
     private bool _ready;
 
@@ -51,6 +55,9 @@ public sealed class OverlayRenderer : IDisposable
         _bText    = rt.CreateSolidColorBrush(ColText);
         _bPanel   = rt.CreateSolidColorBrush(ColPanel);
         _bLandmark = rt.CreateSolidColorBrush(ColLandmark);
+        _bMagic   = rt.CreateSolidColorBrush(ColMagic);
+        _bRare    = rt.CreateSolidColorBrush(ColRare);
+        _bUnique  = rt.CreateSolidColorBrush(ColUnique);
         _tf = _window.DWriteFactory.CreateTextFormat("Consolas", null, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, 12f, "en-us");
         _ready = true;
     }
@@ -65,9 +72,14 @@ public sealed class OverlayRenderer : IDisposable
         rt.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
         try
         {
-            DrawStatus(rt, ctx);
-            if (ctx is { InGame: true, Map.IsVisible: true })
-                DrawMap(rt, ctx);
+            // Draw nothing unless PoE2 is the foreground window — so the overlay never shows
+            // over other apps when you alt-tab. (The cleared frame above hides prior content.)
+            if (ctx.Active)
+            {
+                DrawStatus(rt, ctx);
+                if (ctx is { InGame: true, Map.IsVisible: true })
+                    DrawMap(rt, ctx);
+            }
         }
         finally { rt.EndDraw(); }
         _window.Present();
@@ -124,7 +136,14 @@ public sealed class OverlayRenderer : IDisposable
             {
                 case Poe2Live.EntityCategory.Monster:
                     if (!e.IsAlive) continue;            // skip corpses
-                    brush = _bMonster!; r = 3.0f; break;
+                    (brush, r) = e.Rarity switch          // color + size by rarity
+                    {
+                        Poe2Live.Rarity.Unique => (_bUnique!, 5.5f),
+                        Poe2Live.Rarity.Rare   => (_bRare!, 4.2f),
+                        Poe2Live.Rarity.Magic  => (_bMagic!, 3.3f),
+                        _                      => (_bMonster!, 2.8f),
+                    };
+                    break;
                 case Poe2Live.EntityCategory.Player:     brush = _bPlayer!; r = 3.0f; break;
                 case Poe2Live.EntityCategory.Npc:        brush = _bNpc!;    r = 3.5f; break;
                 case Poe2Live.EntityCategory.Chest:      brush = _bChest!;  r = 3.0f; break;
@@ -163,6 +182,7 @@ public sealed class OverlayRenderer : IDisposable
     {
         _bPlayer?.Dispose(); _bMonster?.Dispose(); _bNpc?.Dispose(); _bChest?.Dispose();
         _bTrans?.Dispose(); _bObject?.Dispose(); _bOther?.Dispose(); _bText?.Dispose(); _bPanel?.Dispose(); _bLandmark?.Dispose();
+        _bMagic?.Dispose(); _bRare?.Dispose(); _bUnique?.Dispose();
         _tf?.Dispose();
         _terrain?.Dispose();
     }

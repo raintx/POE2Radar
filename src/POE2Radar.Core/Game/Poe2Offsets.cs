@@ -133,6 +133,13 @@ public static class Poe2
         public const int ModelBounds          = 0x144; // candidate (3 floats right after world pos)
     }
 
+    /// <summary>ObjectMagicProperties component — monster rarity.</summary>
+    public static class ObjectMagicProperties
+    {
+        // ✓ validated live across 21 monsters (values 0 and 2 seen). Enum: 0=Normal,1=Magic,2=Rare,3=Unique.
+        public const int Rarity = 0x144;
+    }
+
     /// <summary>Positioned component.</summary>
     public static class Positioned
     {

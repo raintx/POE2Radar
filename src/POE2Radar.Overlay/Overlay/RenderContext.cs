@@ -6,6 +6,7 @@ namespace POE2Radar.Overlay;
 /// <summary>What the PoE2 renderer needs each frame. Built fresh by <see cref="RadarApp"/>.</summary>
 public sealed record RenderContext(
     bool InGame,
+    bool Active,            // PoE2 is the foreground window — draw nothing when false
     int WindowWidth,
     int WindowHeight,
     NumVec2 PlayerGrid,

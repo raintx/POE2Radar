@@ -113,7 +113,7 @@ public sealed class ApiServer : IDisposable
                     .Select(e => new
                     {
                         id = e.Id, addr = $"0x{e.Address:X}", category = e.Category.ToString(), metadata = e.Metadata,
-                        poi = e.Poi, reaction = e.Reaction, friendly = e.IsFriendly,
+                        poi = e.Poi, reaction = e.Reaction, friendly = e.IsFriendly, rarity = e.Rarity.ToString(),
                         x = e.Grid.X, y = e.Grid.Y, hpCur = e.HpCur, hpMax = e.HpMax,
                         alive = e.HpMax <= 0 || e.HpCur > 0,
                         dist = (int)Dist(e.Grid, s.Player),
