@@ -51,8 +51,11 @@ clearly gated — a personal QoL tool, not a headless bot.
 - `RadarApp.cs` — tick loop. Render rate (~144 Hz): live player + render. World rate (~30 Hz):
   refresh entities/terrain/landmarks. Publishes a `RadarState` for the API; runs auto-flask.
 - `Overlay/OverlayWindow.cs` — per-pixel-alpha layered window (`UpdateLayeredWindow`), tracks the
-  game window. `Overlay/OverlayRenderer.cs` — Direct2D: terrain bitmap + entity dots (colored/sized
-  by rarity) + POI rings + landmark markers + player blip + HUD. Drawn only when PoE2 is focused.
+  game window. `Overlay/OverlayRenderer.cs` — Direct2D: terrain bitmap + entity dots + landmark
+  markers + world-space HP bars + player blip + HUD. Drawn only when PoE2 is focused. Icon
+  shape/color/opacity/size per item, metadata-matched "mechanic" overrides, and HP-bar geometry are
+  config-driven via `RadarSettings.Styles` / `.HpBars` (defaults mirror the old hardcoded look) and
+  editable live in the Console Settings tab. HP-bar rarity is signaled by scaling border weight.
 - `Overlay/TerrainBitmap.cs` — bakes the walkable grid into a bitmap, rebuilt per area.
 - `Web/ApiServer.cs` — read-only HTTP API on `localhost:7777` (`/state`, `/entities`, `/landmarks`).
 - `Input/SendInputNative.cs` — scancode `SendInput` for auto-flask.

@@ -188,6 +188,29 @@ internal static class DashboardHtml
   .saved{font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--good); opacity:0; transition:opacity .3s}
   .saved.show{opacity:1}
 
+  /* ── icon / mechanic style editors ── */
+  .stylerow{display:flex; align-items:center; gap:9px; padding:9px 0; border-bottom:1px dotted var(--line-soft); flex-wrap:wrap}
+  .stylerow:last-child{border-bottom:none}
+  .stylerow .nm{flex:1 1 110px; min-width:90px; font-size:12px; color:var(--ink)}
+  .stylerow .sw{width:38px; height:20px}
+  .stylerow .sw .knob{width:13px; height:13px}
+  .stylerow .sw input:checked ~ .knob{transform:translateX(18px)}
+  select.sel2{font-family:inherit; font-size:11px; color:var(--ink); background:#0c0a07; border:1px solid var(--line); border-radius:2px; padding:4px 6px; cursor:pointer}
+  select.sel2:focus{outline:none; border-color:var(--gold-deep)}
+  input[type=color]{width:30px; height:24px; padding:0; border:1px solid var(--line); background:#0c0a07; border-radius:2px; cursor:pointer; flex:none}
+  input[type=range].op{width:78px; accent-color:var(--gold); flex:none}
+  .opv{font-size:10px; color:var(--ink-faint); width:30px; text-align:right}
+  .numin.sz{width:56px}
+  .mechrow{border:1px solid var(--line-soft); border-radius:3px; background:var(--panel2); padding:10px 12px; margin-bottom:8px}
+  .mechrow .top{display:flex; align-items:center; gap:9px; margin-bottom:8px}
+  .mechrow .top input.mname{flex:1; font-family:inherit; font-size:12px; color:var(--ink); background:#0c0a07; border:1px solid var(--line); border-radius:2px; padding:5px 9px}
+  .mechrow .matchin{width:100%; font-family:inherit; font-size:11px; color:var(--ink-dim); background:#0c0a07; border:1px solid var(--line); border-radius:2px; padding:5px 9px; margin-bottom:8px}
+  .mechrow .ctl{display:flex; align-items:center; gap:9px; flex-wrap:wrap}
+  .delbtn{font-family:inherit; font-size:11px; color:var(--blood-bright); background:transparent; border:1px solid var(--line); border-radius:2px; padding:4px 9px; cursor:pointer; flex:none}
+  .delbtn:hover{border-color:var(--blood-bright)}
+  .addbtn{font-family:"Cinzel","Georgia",serif; font-size:11px; letter-spacing:.1em; color:var(--gold-bright); background:transparent; border:1px dashed var(--gold-deep); border-radius:3px; padding:8px 14px; cursor:pointer; width:100%; margin-top:4px}
+  .addbtn:hover{background:rgba(200,160,73,.07)}
+
   /* ── dashboard nav list ── */
   .navrow{display:flex; align-items:center; gap:12px; padding:9px 12px; border:1px solid var(--line-soft); border-radius:3px; margin-bottom:6px; background:var(--panel); cursor:pointer}
   .navrow:hover{border-color:var(--gold-deep)}
@@ -277,14 +300,38 @@ internal static class DashboardHtml
           </div>
           <div class="card">
             <h3>Monster HP Bars <span class="tag">&middot; by rarity</span></h3>
-            <div class="row"><div class="rl">Normal</div>
+            <div class="row"><div class="rl">Normal<small>plain bar, no border</small></div>
               <label class="sw"><input type="checkbox" data-set="hpBarNormal"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl" style="color:var(--magic)">Magic</div>
+            <div class="row"><div class="rl" style="color:var(--magic)">Magic<small>thin rarity border</small></div>
               <label class="sw"><input type="checkbox" data-set="hpBarMagic"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl" style="color:var(--rare)">Rare</div>
+            <div class="row"><div class="rl" style="color:var(--rare)">Rare<small>thick rarity border</small></div>
               <label class="sw"><input type="checkbox" data-set="hpBarRare"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl" style="color:var(--unique)">Unique</div>
+            <div class="row"><div class="rl" style="color:var(--unique)">Unique<small>double rarity border</small></div>
               <label class="sw"><input type="checkbox" data-set="hpBarUnique"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl hint-row">Border weight signals rarity; bar color follows the monster icon color.</div></div>
+          </div>
+          <div class="card">
+            <h3>HP Bar Sizing</h3>
+            <div class="row"><div class="rl">Bar height<small>pixels</small></div>
+              <input class="numin" type="number" step="1" min="1" max="30" data-hp="height"></div>
+            <div class="row"><div class="rl">Offset X<small>horizontal shift from the mob</small></div>
+              <input class="numin" type="number" step="1" data-hp="offsetX"></div>
+            <div class="row"><div class="rl">Offset Y<small>vertical shift (negative = above)</small></div>
+              <input class="numin" type="number" step="1" data-hp="offsetY"></div>
+            <div class="row"><div class="rl">Width &middot; Normal</div><input class="numin" type="number" step="1" min="4" data-hp="widthNormal"></div>
+            <div class="row"><div class="rl" style="color:var(--magic)">Width &middot; Magic</div><input class="numin" type="number" step="1" min="4" data-hp="widthMagic"></div>
+            <div class="row"><div class="rl" style="color:var(--rare)">Width &middot; Rare</div><input class="numin" type="number" step="1" min="4" data-hp="widthRare"></div>
+            <div class="row"><div class="rl" style="color:var(--unique)">Width &middot; Unique</div><input class="numin" type="number" step="1" min="4" data-hp="widthUnique"></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3>Radar Icons <span class="tag">&middot; shape &middot; color &middot; opacity &middot; size</span></h3>
+            <div id="iconStyles"></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3>Mechanics <span class="tag">&middot; metadata-matched icon overrides</span></h3>
+            <div class="row"><div class="rl hint-row">When an entity's metadata contains any comma-separated match term, it draws this icon instead of its generic dot. First enabled match wins.</div></div>
+            <div id="mechList"></div>
+            <button class="addbtn" id="mechAdd">+ Add mechanic</button>
           </div>
           <div class="card">
             <h3>Map Calibration</h3>
@@ -419,6 +466,9 @@ async function loadSettings(){
       else if(el.classList.contains('keyin')) el.value=vkToChar(s[k]);
       else if(s[k]!==undefined) el.value=s[k];
     });
+    styles = s.styles || null;
+    hpBars = s.hpBars || null;
+    renderHpBars(); renderIcons(); renderMechanics();
   }catch(e){}
 }
 async function saveSetting(key,val){
@@ -439,6 +489,87 @@ function wireSettings(){
 const charToVk = s => { const c=(s||'').trim().toUpperCase().charCodeAt(0); return isNaN(c)?0:c; };
 const vkToChar = v => v ? String.fromCharCode(v) : '';
 
+/* ── icon / HP-bar / mechanics editors (nested objects: POST the whole {styles}/{hpBars}) ── */
+let styles=null, hpBars=null;
+const SHAPES=['Circle','Triangle','Star','Diamond','Plus','Square'];
+const ICON_KEYS=[
+  ['monsterNormal','Monster · Normal'],['monsterMagic','Monster · Magic'],
+  ['monsterRare','Monster · Rare'],['monsterUnique','Monster · Unique'],
+  ['player','Player'],['npc','NPC'],['chestRare','Chest · Rare'],
+  ['chestUnique','Chest · Unique'],['transition','Transition'],
+  ['poi','Point of Interest'],['landmark','Landmark']];
+const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const shapeOpts=sel=>SHAPES.map(s=>`<option${s===sel?' selected':''}>${s}</option>`).join('');
+const pct=o=>Math.round((o==null?1:o)*100);
+const saveStyles=()=>{ if(styles) saveSetting('styles',styles); };
+const saveHpBars=()=>{ if(hpBars) saveSetting('hpBars',hpBars); };
+
+function renderHpBars(){ if(!hpBars) return; $$('[data-hp]').forEach(el=>{ if(hpBars[el.dataset.hp]!==undefined) el.value=hpBars[el.dataset.hp]; }); }
+function wireHpBars(){ $$('[data-hp]').forEach(el=>{ el.onchange=()=>{ const v=parseFloat(el.value); if(!isNaN(v)&&hpBars){ hpBars[el.dataset.hp]=v; saveHpBars(); } }; }); }
+
+function iconRow(key,label,o){
+  return `<div class="stylerow" data-k="${key}">
+    <label class="sw"><input type="checkbox" class="i-en"${o.enabled?' checked':''}><span class="track"></span><span class="knob"></span></label>
+    <span class="nm">${label}</span>
+    <select class="sel2 i-shape">${shapeOpts(o.shape)}</select>
+    <input type="color" class="i-color" value="${o.color||'#ffffff'}">
+    <input type="range" class="op i-op" min="0" max="100" value="${pct(o.opacity)}">
+    <span class="opv">${pct(o.opacity)}%</span>
+    <input type="number" class="numin sz i-size" step="0.1" min="0.5" value="${o.size}">
+  </div>`;
+}
+function renderIcons(){
+  if(!styles){ $('#iconStyles').innerHTML=''; return; }
+  $('#iconStyles').innerHTML=ICON_KEYS.map(([k,l])=>iconRow(k,l,styles[k]||{})).join('');
+  $$('#iconStyles .stylerow').forEach(row=>{
+    const o=styles[row.dataset.k]; if(!o) return;
+    row.querySelector('.i-en').onchange=e=>{ o.enabled=e.target.checked; saveStyles(); };
+    row.querySelector('.i-shape').onchange=e=>{ o.shape=e.target.value; saveStyles(); };
+    row.querySelector('.i-color').onchange=e=>{ o.color=e.target.value; saveStyles(); };
+    const op=row.querySelector('.i-op'), opv=row.querySelector('.opv');
+    op.oninput=()=>{ opv.textContent=op.value+'%'; };
+    op.onchange=()=>{ o.opacity=(+op.value)/100; saveStyles(); };
+    row.querySelector('.i-size').onchange=e=>{ const v=parseFloat(e.target.value); if(!isNaN(v)){ o.size=v; saveStyles(); } };
+  });
+}
+
+function mechRow(m,i){
+  return `<div class="mechrow" data-i="${i}">
+    <div class="top">
+      <label class="sw"><input type="checkbox" class="m-en"${m.enabled?' checked':''}><span class="track"></span><span class="knob"></span></label>
+      <input class="mname" placeholder="Name (e.g. Expedition)" value="${esc(m.name)}">
+      <button class="delbtn m-del">Remove</button>
+    </div>
+    <input class="matchin m-match" placeholder="match terms, comma-separated (e.g. Strongbox, StrongBoxes)" value="${esc((m.match||[]).join(', '))}">
+    <div class="ctl">
+      <select class="sel2 m-shape">${shapeOpts(m.shape)}</select>
+      <input type="color" class="m-color" value="${m.color||'#ffffff'}">
+      <input type="range" class="op m-op" min="0" max="100" value="${pct(m.opacity)}">
+      <span class="opv">${pct(m.opacity)}%</span>
+      <input type="number" class="numin sz m-size" step="0.1" min="0.5" value="${m.size}">
+    </div>
+  </div>`;
+}
+function renderMechanics(){
+  if(!styles){ $('#mechList').innerHTML=''; return; }
+  styles.mechanics=styles.mechanics||[];
+  $('#mechList').innerHTML=styles.mechanics.map((m,i)=>mechRow(m,i)).join('');
+  $$('#mechList .mechrow').forEach(row=>{
+    const m=styles.mechanics[+row.dataset.i]; if(!m) return;
+    row.querySelector('.m-en').onchange=e=>{ m.enabled=e.target.checked; saveStyles(); };
+    row.querySelector('.mname').onchange=e=>{ m.name=e.target.value; saveStyles(); };
+    row.querySelector('.m-match').onchange=e=>{ m.match=e.target.value.split(',').map(s=>s.trim()).filter(Boolean); saveStyles(); };
+    row.querySelector('.m-shape').onchange=e=>{ m.shape=e.target.value; saveStyles(); };
+    row.querySelector('.m-color').onchange=e=>{ m.color=e.target.value; saveStyles(); };
+    const op=row.querySelector('.m-op'), opv=row.querySelector('.opv');
+    op.oninput=()=>{ opv.textContent=op.value+'%'; };
+    op.onchange=()=>{ m.opacity=(+op.value)/100; saveStyles(); };
+    row.querySelector('.m-size').onchange=e=>{ const v=parseFloat(e.target.value); if(!isNaN(v)){ m.size=v; saveStyles(); } };
+    row.querySelector('.m-del').onclick=()=>{ styles.mechanics.splice(+row.dataset.i,1); renderMechanics(); saveStyles(); };
+  });
+}
+$('#mechAdd').onclick=()=>{ if(!styles) return; styles.mechanics=styles.mechanics||[]; styles.mechanics.push({enabled:true,name:'New',match:[],shape:'Star',color:'#ffd926',opacity:1,size:6}); renderMechanics(); saveStyles(); };
+
 /* ── left rail ── */
 function renderState(){
   const s=state; if(!s) return;
@@ -457,7 +588,7 @@ function renderState(){
   $('#areaChip').innerHTML = (s.areaCode? s.areaCode : '—') + ' <b>·</b> ' + (s.inGame?'in game':'town/menu');
 }
 
-wireSettings(); loadSettings();
+wireSettings(); wireHpBars(); loadSettings();
 tick(); setInterval(tick, 1000);
 </script>
 </body>

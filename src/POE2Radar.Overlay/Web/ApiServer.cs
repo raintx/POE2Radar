@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using POE2Radar.Core.Game;
 using POE2Radar.Overlay.Config;
 
@@ -240,6 +241,8 @@ public sealed class ApiServer : IDisposable
         lifeKey = _settings.LifeKey,
         manaKey = _settings.ManaKey,
         apiPort = _settings.ApiPort, // display only — changing it needs a restart
+        styles = _settings.Styles,   // per-item icon shapes/colors/sizes + mechanic overrides
+        hpBars = _settings.HpBars,   // monster HP-bar geometry (width/height/offset)
     };
 
     /// <summary>Apply only whitelisted radar/visual keys from a posted JSON object; persists on change.</summary>
@@ -274,12 +277,86 @@ public sealed class ApiServer : IDisposable
                 case "manaCooldownMs" when TryInt(p.Value, out var n): _settings.ManaCooldownMs = Math.Clamp(n, 0, 60000); applied.Add(p.Name); break;
                 case "lifeKey" when TryInt(p.Value, out var n): _settings.LifeKey = Math.Clamp(n, 1, 255); applied.Add(p.Name); break;
                 case "manaKey" when TryInt(p.Value, out var n): _settings.ManaKey = Math.Clamp(n, 1, 255); applied.Add(p.Name); break;
+                // Whole-object writes (the dashboard re-POSTs the full sub-object on edit). Parsed,
+                // sanitized/clamped, then swapped in. A malformed sub-object is skipped, not fatal.
+                case "styles" when p.Value.ValueKind == JsonValueKind.Object:
+                    if (TryParseStyles(p.Value, out var styles)) { _settings.Styles = styles; applied.Add(p.Name); }
+                    break;
+                case "hpBars" when p.Value.ValueKind == JsonValueKind.Object:
+                    if (TryParseHpBars(p.Value, out var hpBars)) { _settings.HpBars = hpBars; applied.Add(p.Name); }
+                    break;
                 // Anything else (apiPort, unknown keys) is ignored by design.
             }
         }
 
         if (applied.Count > 0) _settings.Save();
         return applied.ToArray();
+    }
+
+    private static readonly HashSet<string> AllowedShapes =
+        new(StringComparer.Ordinal) { "Circle", "Triangle", "Star", "Diamond", "Plus", "Square" };
+    private static readonly Regex HexColor = new("^#[0-9A-Fa-f]{6}$", RegexOptions.Compiled);
+
+    /// <summary>Deserialize + sanitize a full <see cref="RadarStyles"/> from posted JSON. Returns false
+    /// (and leaves settings untouched) if the JSON can't be parsed.</summary>
+    private static bool TryParseStyles(JsonElement el, out RadarStyles styles)
+    {
+        styles = new RadarStyles();
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<RadarStyles>(el.GetRawText(), Json);
+            if (parsed == null) return false;
+            foreach (var ic in new[] { parsed.MonsterNormal, parsed.MonsterMagic, parsed.MonsterRare, parsed.MonsterUnique,
+                                       parsed.Player, parsed.Npc, parsed.ChestRare, parsed.ChestUnique, parsed.Transition, parsed.Poi, parsed.Landmark })
+                SanitizeIcon(ic);
+            parsed.Mechanics ??= new List<MechanicStyle>();
+            if (parsed.Mechanics.Count > 24) parsed.Mechanics = parsed.Mechanics.Take(24).ToList();
+            foreach (var m in parsed.Mechanics)
+            {
+                m.Shape = AllowedShapes.Contains(m.Shape) ? m.Shape : "Circle";
+                m.Color = m.Color != null && HexColor.IsMatch(m.Color) ? m.Color.ToUpperInvariant() : "#FFFFFF";
+                m.Opacity = Math.Clamp(m.Opacity, 0f, 1f);
+                m.Size = Math.Clamp(m.Size, 0.5f, 40f);
+                m.Name = (m.Name ?? "").Trim();
+                if (m.Name.Length > 40) m.Name = m.Name[..40];
+                m.Match ??= new List<string>();
+                m.Match = m.Match.Where(x => !string.IsNullOrWhiteSpace(x))
+                                 .Select(x => x.Trim() is var t && t.Length > 64 ? t[..64] : x.Trim())
+                                 .Take(8).ToList();
+            }
+            styles = parsed;
+            return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static void SanitizeIcon(IconStyle s)
+    {
+        s.Shape = AllowedShapes.Contains(s.Shape) ? s.Shape : "Circle";
+        s.Color = s.Color != null && HexColor.IsMatch(s.Color) ? s.Color.ToUpperInvariant() : "#FFFFFF";
+        s.Opacity = Math.Clamp(s.Opacity, 0f, 1f);
+        s.Size = Math.Clamp(s.Size, 0.5f, 40f);
+    }
+
+    /// <summary>Deserialize + clamp a full <see cref="HpBarSettings"/> from posted JSON.</summary>
+    private static bool TryParseHpBars(JsonElement el, out HpBarSettings hp)
+    {
+        hp = new HpBarSettings();
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<HpBarSettings>(el.GetRawText(), Json);
+            if (parsed == null) return false;
+            parsed.Height = Math.Clamp(parsed.Height, 1f, 30f);
+            parsed.OffsetX = Math.Clamp(parsed.OffsetX, -200f, 200f);
+            parsed.OffsetY = Math.Clamp(parsed.OffsetY, -200f, 200f);
+            parsed.WidthNormal = Math.Clamp(parsed.WidthNormal, 4f, 400f);
+            parsed.WidthMagic = Math.Clamp(parsed.WidthMagic, 4f, 400f);
+            parsed.WidthRare = Math.Clamp(parsed.WidthRare, 4f, 400f);
+            parsed.WidthUnique = Math.Clamp(parsed.WidthUnique, 4f, 400f);
+            hp = parsed;
+            return true;
+        }
+        catch (JsonException) { return false; }
     }
 
     /// <summary>The navigation selection as a list of {id, slot} objects (for the GET/POST payloads).</summary>

@@ -56,6 +56,14 @@ public sealed class RadarSettings
     // ── HTTP API. ──
     public int ApiPort { get; set; } = 7777;
 
+    // ── Per-item icon styling (shape / color / opacity / size) + metadata-matched "mechanic"
+    //    overrides. Defaults reproduce the original hardcoded look exactly. ──
+    public RadarStyles Styles { get; set; } = new();
+
+    // ── Monster HP-bar geometry (the per-rarity ENABLE flags above stay the source of truth;
+    //    this only adds sizing/offset). Rarity is signaled by a scaling border weight. ──
+    public HpBarSettings HpBars { get; set; } = new();
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -107,4 +115,91 @@ public sealed class RadarSettings
             Console.Error.WriteLine($"Settings save failed: {ex.Message}");
         }
     }
+}
+
+/// <summary>
+/// A single drawable radar icon: shape, RGB color, opacity, pixel size, and an enable toggle.
+/// <see cref="Shape"/> is one of Circle/Triangle/Star/Diamond/Plus/Square (anything else falls back
+/// to Circle when rendered); <see cref="Color"/> is <c>#RRGGBB</c>; <see cref="Opacity"/> is 0..1.
+/// </summary>
+public sealed class IconStyle
+{
+    public bool Enabled { get; set; } = true;
+    public string Shape { get; set; } = "Circle";
+    public string Color { get; set; } = "#FFFFFF";
+    public float Opacity { get; set; } = 1.0f;
+    public float Size { get; set; } = 3.0f;
+
+    public IconStyle() { }
+    public IconStyle(string shape, string color, float opacity, float size)
+    {
+        Shape = shape; Color = color; Opacity = opacity; Size = size;
+    }
+}
+
+/// <summary>
+/// A user-defined "mechanic" highlight: when an entity's metadata contains ANY of <see cref="Match"/>
+/// (case-insensitive), it draws this icon instead of its generic category dot — so e.g. an Expedition
+/// marker or a Strongbox stands out. The first enabled matching rule wins.
+/// </summary>
+public sealed class MechanicStyle
+{
+    public bool Enabled { get; set; } = true;
+    public string Name { get; set; } = "";
+    public List<string> Match { get; set; } = new();
+    public string Shape { get; set; } = "Star";
+    public string Color { get; set; } = "#FFFFFF";
+    public float Opacity { get; set; } = 1.0f;
+    public float Size { get; set; } = 6.0f;
+}
+
+/// <summary>
+/// Monster HP-bar geometry. Width is per-rarity; height + X/Y offset are shared. The per-rarity
+/// enable flags live on <see cref="RadarSettings"/> (HpBarNormal/Magic/Rare/Unique); the bar/border
+/// color is taken from the matching monster icon color so "rare = gold" stays one setting.
+/// </summary>
+public sealed class HpBarSettings
+{
+    public float Height { get; set; } = 5f;
+    public float OffsetX { get; set; } = 0f;
+    public float OffsetY { get; set; } = -30f; // px relative to the mob's screen position (neg = up)
+    public float WidthNormal { get; set; } = 30f;
+    public float WidthMagic { get; set; } = 38f;
+    public float WidthRare { get; set; } = 50f;
+    public float WidthUnique { get; set; } = 64f;
+}
+
+/// <summary>
+/// The full radar icon style table. Every default mirrors the formerly hardcoded values in
+/// <c>OverlayRenderer</c>, so a missing/partial config renders identically to before.
+/// </summary>
+public sealed class RadarStyles
+{
+    // Monster dots by rarity.
+    public IconStyle MonsterNormal { get; set; } = new("Circle",   "#FF3333", 0.95f, 2.6f);
+    public IconStyle MonsterMagic  { get; set; } = new("Diamond",  "#73A6FF", 0.97f, 3.4f);
+    public IconStyle MonsterRare   { get; set; } = new("Triangle", "#FFD926", 1.00f, 5.5f);
+    public IconStyle MonsterUnique { get; set; } = new("Star",     "#FF7300", 1.00f, 6.5f);
+
+    // Other entity categories.
+    public IconStyle Player        { get; set; } = new("Circle",  "#4DF2FF", 1.00f, 3.0f);
+    public IconStyle Npc           { get; set; } = new("Plus",    "#FFD933", 0.95f, 4.0f);
+    public IconStyle ChestRare     { get; set; } = new("Square",  "#FFD926", 0.95f, 5.0f);
+    public IconStyle ChestUnique   { get; set; } = new("Square",  "#FF7300", 0.95f, 5.0f);
+    public IconStyle Transition    { get; set; } = new("Diamond", "#66FF99", 0.95f, 4.5f);
+    public IconStyle Poi           { get; set; } = new("Circle",  "#8CBFFF", 0.70f, 3.0f);
+
+    // Tile landmarks (shape marker + text label at the group centroid).
+    public IconStyle Landmark      { get; set; } = new("Diamond", "#F259F2", 1.00f, 5.0f);
+
+    // Metadata-matched overrides (first enabled match wins). Seeded with common PoE2 mechanics.
+    public List<MechanicStyle> Mechanics { get; set; } = new()
+    {
+        new() { Name = "Expedition", Match = new() { "ExpeditionEncounter", "Expedition" }, Shape = "Plus",     Color = "#26E6D9", Opacity = 1f, Size = 7f },
+        new() { Name = "Ritual",     Match = new() { "Ritual" },                            Shape = "Star",     Color = "#FF3355", Opacity = 1f, Size = 7f },
+        new() { Name = "Breach",     Match = new() { "Breach" },                            Shape = "Diamond",  Color = "#A64DFF", Opacity = 1f, Size = 7f },
+        new() { Name = "Strongbox",  Match = new() { "Strongbox", "StrongBoxes" },          Shape = "Square",   Color = "#FFB300", Opacity = 1f, Size = 6f },
+        new() { Name = "Essence",    Match = new() { "Essence" },                           Shape = "Triangle", Color = "#33E0FF", Opacity = 1f, Size = 7f },
+        new() { Name = "Shrine",     Match = new() { "Shrine" },                            Shape = "Star",     Color = "#7DFF7D", Opacity = 1f, Size = 6f },
+    };
 }

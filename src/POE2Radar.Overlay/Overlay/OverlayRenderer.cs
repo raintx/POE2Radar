@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Numerics;
 using POE2Radar.Core.Game;
 using POE2Radar.Core.Pathfinding;
+using POE2Radar.Overlay.Config;
 using Vortice.Direct2D1;
 using Vortice.DirectWrite;
 using Vortice.Mathematics;
@@ -17,20 +19,15 @@ namespace POE2Radar.Overlay;
 /// </summary>
 public sealed class OverlayRenderer : IDisposable
 {
+    // Entity dot colors now live per-item in RadarSettings.Styles (these were the old hardcoded
+    // values, preserved as the style defaults). Only the HUD/nav/landmark-label colors remain here.
     private static readonly Color4 ColPlayer  = new(0.30f, 0.95f, 1.00f, 1.00f);
-    private static readonly Color4 ColMonster = new(1.00f, 0.20f, 0.20f, 0.95f); // Normal
-    private static readonly Color4 ColMagic   = new(0.45f, 0.65f, 1.00f, 0.97f); // Magic (blue)
-    private static readonly Color4 ColRare    = new(1.00f, 0.85f, 0.15f, 1.00f); // Rare (gold)
-    private static readonly Color4 ColUnique  = new(1.00f, 0.45f, 0.00f, 1.00f); // Unique (orange)
-    private static readonly Color4 ColNpc     = new(1.00f, 0.85f, 0.20f, 0.95f);
-    private static readonly Color4 ColChest   = new(0.95f, 0.55f, 0.10f, 0.95f);
-    private static readonly Color4 ColTrans   = new(0.40f, 1.00f, 0.60f, 0.95f);
-    private static readonly Color4 ColObject  = new(0.55f, 0.75f, 1.00f, 0.70f);
     private static readonly Color4 ColOther   = new(0.70f, 0.70f, 0.70f, 0.60f);
     private static readonly Color4 ColText    = new(1f, 1f, 1f, 1f);
     private static readonly Color4 ColPanel   = new(0.05f, 0.05f, 0.05f, 0.78f);
     private static readonly Color4 ColLandmark = new(0.95f, 0.35f, 0.95f, 1f); // magenta — static tile landmarks
     private static readonly Color4 ColTargetMark = new(1f, 1f, 1f, 1f);          // active-target highlight in the legend
+    private static readonly Color4 ColLowHp   = new(1.00f, 0.20f, 0.20f, 0.95f); // HP-bar fill when below 30% (rarity-independent)
 
     // Distinct, evenly-spread hues for per-landmark guidance paths / legend swatches.
     private static readonly Color4[] PathPalette =
@@ -64,9 +61,9 @@ public sealed class OverlayRenderer : IDisposable
     private enum Icon { Circle, Triangle, Star, Diamond, Plus, Square }
     private ID2D1PathGeometry? _geoTriangle, _geoStar, _geoDiamond, _geoPlus;
 
-    private ID2D1SolidColorBrush? _bPlayer, _bMonster, _bNpc, _bChest, _bTrans, _bObject, _bOther, _bText, _bPanel, _bLandmark;
-    private ID2D1SolidColorBrush? _bMagic, _bRare, _bUnique;
-    private ID2D1SolidColorBrush? _bPath; // recolored per landmark via SetColor
+    private ID2D1SolidColorBrush? _bPlayer, _bOther, _bText, _bPanel, _bLandmark;
+    private ID2D1SolidColorBrush? _bPath;  // recolored per route via SetColor
+    private ID2D1SolidColorBrush? _bStyle; // scratch brush for config-driven icons / HP bars (recolored per draw)
     private IDWriteTextFormat? _tf;
     private bool _ready;
 
@@ -76,20 +73,13 @@ public sealed class OverlayRenderer : IDisposable
     {
         if (_ready) return;
         var rt = _window.RenderTarget;
-        _bPlayer  = rt.CreateSolidColorBrush(ColPlayer);
-        _bMonster = rt.CreateSolidColorBrush(ColMonster);
-        _bNpc     = rt.CreateSolidColorBrush(ColNpc);
-        _bChest   = rt.CreateSolidColorBrush(ColChest);
-        _bTrans   = rt.CreateSolidColorBrush(ColTrans);
-        _bObject  = rt.CreateSolidColorBrush(ColObject);
-        _bOther   = rt.CreateSolidColorBrush(ColOther);
-        _bText    = rt.CreateSolidColorBrush(ColText);
-        _bPanel   = rt.CreateSolidColorBrush(ColPanel);
+        _bPlayer   = rt.CreateSolidColorBrush(ColPlayer);
+        _bOther    = rt.CreateSolidColorBrush(ColOther);
+        _bText     = rt.CreateSolidColorBrush(ColText);
+        _bPanel    = rt.CreateSolidColorBrush(ColPanel);
         _bLandmark = rt.CreateSolidColorBrush(ColLandmark);
-        _bMagic   = rt.CreateSolidColorBrush(ColMagic);
-        _bRare    = rt.CreateSolidColorBrush(ColRare);
-        _bUnique  = rt.CreateSolidColorBrush(ColUnique);
-        _bPath    = rt.CreateSolidColorBrush(PathPalette[0]);
+        _bPath     = rt.CreateSolidColorBrush(PathPalette[0]);
+        _bStyle    = rt.CreateSolidColorBrush(ColText);
         _tf = _window.DWriteFactory.CreateTextFormat("Consolas", null, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, 12f, "en-us");
         _ready = true;
     }
@@ -135,20 +125,24 @@ public sealed class OverlayRenderer : IDisposable
     {
         if (ctx.CameraMatrix is not { } m) return;
         float W = ctx.WindowWidth, H = ctx.WindowHeight;
+        var hb = ctx.HpBars;
+        var st = ctx.Styles;
         foreach (var e in ctx.Entities)
         {
             if (e.Category != Poe2Live.EntityCategory.Monster || !e.IsAlive || e.HpMax <= 0) continue;
             if (e.IsFriendly) continue; // hostile monsters only — no bars over allied/minion mobs
-            // Per-rarity HP-bar toggle (NonMonster never shows one).
-            var showBar = e.Rarity switch
+
+            // Per-rarity enable + width; tier (0..3) drives the scaling border decoration; the bar color
+            // is the matching monster icon color so "rare = gold" stays a single setting (NonMonster → no bar).
+            var (showBar, bw, colorHex, tier) = e.Rarity switch
             {
-                Poe2Live.Rarity.Normal => ctx.HpBarNormal,
-                Poe2Live.Rarity.Magic  => ctx.HpBarMagic,
-                Poe2Live.Rarity.Rare   => ctx.HpBarRare,
-                Poe2Live.Rarity.Unique => ctx.HpBarUnique,
-                _                      => false,
+                Poe2Live.Rarity.Normal => (ctx.HpBarNormal, hb.WidthNormal, st.MonsterNormal.Color, 0),
+                Poe2Live.Rarity.Magic  => (ctx.HpBarMagic,  hb.WidthMagic,  st.MonsterMagic.Color,  1),
+                Poe2Live.Rarity.Rare   => (ctx.HpBarRare,   hb.WidthRare,   st.MonsterRare.Color,   2),
+                Poe2Live.Rarity.Unique => (ctx.HpBarUnique, hb.WidthUnique, st.MonsterUnique.Color,  3),
+                _                      => (false, 0f, "#FFFFFF", 0),
             };
-            if (!showBar) continue;
+            if (!showBar || bw <= 0f) continue;
 
             var w = e.World;
             var cw = w.X*m[3] + w.Y*m[7] + w.Z*m[11] + m[15];
@@ -159,21 +153,36 @@ public sealed class OverlayRenderer : IDisposable
             var sy = (0.5f - cy/cw/2f) * H;
             if (sx < 0 || sx > W || sy < 0 || sy > H) continue;
 
-            var (col, bw) = e.Rarity switch
-            {
-                Poe2Live.Rarity.Unique => (_bUnique!, 64f),
-                Poe2Live.Rarity.Rare   => (_bRare!, 50f),
-                Poe2Live.Rarity.Magic  => (_bMagic!, 38f),
-                _                      => (_bMonster!, 30f), // Normal
-            };
-            const float bh = 5f;
-            var bx = sx - bw / 2f;
-            var by = sy - 30f; // sit above the mob
+            var bh = hb.Height;
+            var bx = sx - bw / 2f + hb.OffsetX;
+            var by = sy + hb.OffsetY; // OffsetY is relative to the mob (negative = above)
             var frac = e.HpFraction;
-            rt.FillRectangle(new Vortice.RawRectF(bx, by, bx + bw, by + bh), _bPanel!);
-            var fill = frac < 0.3f ? _bMonster! : col;
-            rt.FillRectangle(new Vortice.RawRectF(bx, by, bx + bw * frac, by + bh), fill);
-            rt.DrawRectangle(new Vortice.RawRectF(bx, by, bx + bw, by + bh), col, 1f);
+            var col = ParseColor(colorHex, 1f);
+            var barRect = new Vortice.RawRectF(bx, by, bx + bw, by + bh);
+            rt.FillRectangle(barRect, _bPanel!);
+            _bStyle!.Color = frac < 0.3f ? ColLowHp : col;
+            rt.FillRectangle(new Vortice.RawRectF(bx, by, bx + bw * frac, by + bh), _bStyle);
+            DrawHpDecoration(rt, tier, barRect, col);
+        }
+    }
+
+    /// <summary>
+    /// Rarity cue on an HP bar: a border whose weight scales with rarity. Tier 0 (Normal) draws nothing,
+    /// 1 (Magic) a thin border, 2 (Rare) a thick border, 3 (Unique) a double border. Color is the
+    /// rarity color passed in.
+    /// </summary>
+    private void DrawHpDecoration(ID2D1RenderTarget rt, int tier, Vortice.RawRectF r, Color4 col)
+    {
+        if (tier <= 0) return; // Normal: undecorated
+        _bStyle!.Color = col;
+        switch (tier)
+        {
+            case 1: rt.DrawRectangle(r, _bStyle, 1f); break; // Magic: thin
+            case 2: rt.DrawRectangle(r, _bStyle, 2f); break; // Rare: thick
+            default:                                          // Unique: double border
+                rt.DrawRectangle(r, _bStyle, 1.5f);
+                rt.DrawRectangle(new Vortice.RawRectF(r.Left - 3f, r.Top - 3f, r.Right + 3f, r.Bottom + 3f), _bStyle, 1f);
+                break;
         }
     }
 
@@ -281,6 +290,88 @@ public sealed class OverlayRenderer : IDisposable
         rt.Transform = prev;
     }
 
+    /// <summary>A resolved, ready-to-draw icon: parsed shape, pixel size, and color.</summary>
+    private readonly record struct DrawStyle(Icon Shape, float Size, Color4 Color);
+
+    private static Icon ParseShape(string shape) => shape switch
+    {
+        "Triangle" => Icon.Triangle,
+        "Star"     => Icon.Star,
+        "Diamond"  => Icon.Diamond,
+        "Plus"     => Icon.Plus,
+        "Square"   => Icon.Square,
+        _          => Icon.Circle,
+    };
+
+    /// <summary>Parse a <c>#RRGGBB</c> color + 0..1 opacity into a Color4 (falls back to opaque white).</summary>
+    private static Color4 ParseColor(string hex, float opacity)
+    {
+        var a = Math.Clamp(opacity, 0f, 1f);
+        if (hex is { Length: >= 7 } && hex[0] == '#'
+            && byte.TryParse(hex.AsSpan(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var r)
+            && byte.TryParse(hex.AsSpan(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var g)
+            && byte.TryParse(hex.AsSpan(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b))
+            return new Color4(r / 255f, g / 255f, b / 255f, a);
+        return new Color4(1f, 1f, 1f, a);
+    }
+
+    private static DrawStyle ToDrawStyle(IconStyle s) => new(ParseShape(s.Shape), s.Size, ParseColor(s.Color, s.Opacity));
+
+    /// <summary>
+    /// Resolve the icon an entity should draw with, or null to skip it. Order: corpses/used chests are
+    /// dropped first; then an enabled "mechanic" rule whose match substring is in the metadata wins
+    /// (force-drawn, overriding category/ShowMonsters suppression); otherwise the per-category /
+    /// per-rarity style applies, honoring each style's own Enabled flag.
+    /// </summary>
+    private static DrawStyle? ResolveStyle(RenderContext ctx, Poe2Live.EntityDot e)
+    {
+        // Never draw corpses or already-opened chests, even if a mechanic would otherwise match.
+        if (e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive) return null;
+        if (e.Category == Poe2Live.EntityCategory.Chest && e.Opened) return null;
+
+        var st = ctx.Styles;
+
+        // Mechanic overrides — first enabled match wins. Force-draws (e.g. a flagged Expedition marker
+        // shows even if its category would normally be filtered).
+        foreach (var mech in st.Mechanics)
+        {
+            if (!mech.Enabled || mech.Match.Count == 0) continue;
+            foreach (var key in mech.Match)
+            {
+                if (!string.IsNullOrEmpty(key) && e.Metadata.Contains(key, StringComparison.OrdinalIgnoreCase))
+                    return new DrawStyle(ParseShape(mech.Shape), mech.Size, ParseColor(mech.Color, mech.Opacity));
+            }
+        }
+
+        IconStyle style;
+        switch (e.Category)
+        {
+            case Poe2Live.EntityCategory.Monster:
+                if (!ctx.ShowMonsters) return null;
+                style = e.Rarity switch
+                {
+                    Poe2Live.Rarity.Unique => st.MonsterUnique,
+                    Poe2Live.Rarity.Rare   => st.MonsterRare,
+                    Poe2Live.Rarity.Magic  => st.MonsterMagic,
+                    _                      => st.MonsterNormal,
+                };
+                break;
+            case Poe2Live.EntityCategory.Player:     style = st.Player; break;
+            case Poe2Live.EntityCategory.Npc:        style = st.Npc; break;
+            case Poe2Live.EntityCategory.Chest:
+                if (e.Rarity == Poe2Live.Rarity.Unique) style = st.ChestUnique;
+                else if (e.Rarity == Poe2Live.Rarity.Rare) style = st.ChestRare;
+                else return null; // rare+ chests only
+                break;
+            case Poe2Live.EntityCategory.Transition: style = st.Transition; break;
+            default:
+                if (!e.Poi) return null; // Object/Other → only game-flagged POIs
+                style = st.Poi;
+                break;
+        }
+        return style.Enabled ? ToDrawStyle(style) : null;
+    }
+
     private void DrawMap(ID2D1RenderTarget rt, RenderContext ctx)
     {
         // MapCenter = window center + DefaultShift(0,-20) + Shift + manual offset.
@@ -316,46 +407,27 @@ public sealed class OverlayRenderer : IDisposable
         foreach (var e in ctx.Entities)
         {
             if (ctx.HideJunk && JunkFilter.IsJunk(e.Metadata)) continue;
-            ID2D1SolidColorBrush brush; float r; Icon icon;
-            switch (e.Category)
-            {
-                case Poe2Live.EntityCategory.Monster:
-                    if (!ctx.ShowMonsters) continue;     // monster dots toggle
-                    if (!e.IsAlive) continue;            // skip corpses
-                    (brush, r, icon) = e.Rarity switch    // distinct shape + color by rarity
-                    {
-                        Poe2Live.Rarity.Unique => (_bUnique!, 6.5f, Icon.Star),
-                        Poe2Live.Rarity.Rare   => (_bRare!, 5.5f, Icon.Triangle),
-                        Poe2Live.Rarity.Magic  => (_bMagic!, 3.4f, Icon.Diamond),
-                        _                      => (_bMonster!, 2.6f, Icon.Circle),
-                    };
-                    break;
-                case Poe2Live.EntityCategory.Player:     (brush, r, icon) = (_bPlayer!, 3.0f, Icon.Circle); break;
-                case Poe2Live.EntityCategory.Npc:        (brush, r, icon) = (_bNpc!, 4.0f, Icon.Plus); break;
-                case Poe2Live.EntityCategory.Chest:
-                    if (e.Opened) continue;                                   // skip used chests
-                    if (e.Rarity is not (Poe2Live.Rarity.Rare or Poe2Live.Rarity.Unique)) continue; // rare+ only
-                    (brush, r, icon) = (e.Rarity == Poe2Live.Rarity.Unique ? _bUnique! : _bRare!, 5.0f, Icon.Square);
-                    break;
-                case Poe2Live.EntityCategory.Transition: (brush, r, icon) = (_bTrans!, 4.5f, Icon.Diamond); break;
-                default:
-                    if (!e.Poi) continue;                // Object/Other → skip unless a POI
-                    (brush, r, icon) = (_bObject!, 3.0f, Icon.Circle); break;
-            }
+            if (ResolveStyle(ctx, e) is not { } ds) continue; // null = filtered out
             var p = Project(new NumVec2(e.Grid.X, e.Grid.Y), player, center, scale);
-            DrawIcon(rt, icon, p, r, brush, filled: true);
+            _bStyle!.Color = ds.Color;
+            DrawIcon(rt, ds.Shape, p, ds.Size, _bStyle, filled: true);
         }
 
-        // Static tile landmarks (boss arena, treasure, …) — diamond + label at the group centroid.
-        foreach (var lm in ctx.Landmarks)
+        // Static tile landmarks (boss arena, treasure, …) — configured marker + label at the centroid.
+        var lmStyle = ctx.Styles.Landmark;
+        if (lmStyle.Enabled)
         {
-            var p = Project(new NumVec2(lm.Center.X, lm.Center.Y), player, center, scale);
-            var d = 5f;
-            var diamond = new[] { new NumVec2(p.X, p.Y - d), new NumVec2(p.X + d, p.Y), new NumVec2(p.X, p.Y + d), new NumVec2(p.X - d, p.Y) };
-            for (var i = 0; i < 4; i++) rt.DrawLine(diamond[i], diamond[(i + 1) % 4], _bLandmark!, 1.6f);
-            // Prefer the curated friendly label when enabled and present; else the derived name.
-            var label = ctx.UseCuratedLandmarks && lm.CuratedName is { } c ? c : lm.Name;
-            rt.DrawText(label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bLandmark!, DrawTextOptions.Clip);
+            var lmIcon = ParseShape(lmStyle.Shape);
+            var lmColor = ParseColor(lmStyle.Color, lmStyle.Opacity);
+            foreach (var lm in ctx.Landmarks)
+            {
+                var p = Project(new NumVec2(lm.Center.X, lm.Center.Y), player, center, scale);
+                _bStyle!.Color = lmColor;
+                DrawIcon(rt, lmIcon, p, lmStyle.Size, _bStyle, filled: true);
+                // Prefer the curated friendly label when enabled and present; else the derived name.
+                var label = ctx.UseCuratedLandmarks && lm.CuratedName is { } c ? c : lm.Name;
+                rt.DrawText(label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bStyle, DrawTextOptions.Clip);
+            }
         }
 
         // Draw-only guidance routes: one full smoothed A* polyline per selected landmark, each in its
@@ -505,10 +577,8 @@ public sealed class OverlayRenderer : IDisposable
 
     public void Dispose()
     {
-        _bPlayer?.Dispose(); _bMonster?.Dispose(); _bNpc?.Dispose(); _bChest?.Dispose();
-        _bTrans?.Dispose(); _bObject?.Dispose(); _bOther?.Dispose(); _bText?.Dispose(); _bPanel?.Dispose(); _bLandmark?.Dispose();
-        _bMagic?.Dispose(); _bRare?.Dispose(); _bUnique?.Dispose();
-        _bPath?.Dispose();
+        _bPlayer?.Dispose(); _bOther?.Dispose(); _bText?.Dispose(); _bPanel?.Dispose(); _bLandmark?.Dispose();
+        _bPath?.Dispose(); _bStyle?.Dispose();
         _geoTriangle?.Dispose(); _geoStar?.Dispose(); _geoDiamond?.Dispose(); _geoPlus?.Dispose();
         _tf?.Dispose();
         _terrain?.Dispose();

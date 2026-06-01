@@ -213,7 +213,9 @@ public sealed class RadarApp : IDisposable
             IsSelected: selectedSnapshot.Contains,
             Legend: BuildLegend(selectedSnapshot),
             NavMenuExpanded: _navMenuExpanded,
-            NavMenuCorner: _settings.NavMenuCorner);
+            NavMenuCorner: _settings.NavMenuCorner,
+            Styles: _settings.Styles,
+            HpBars: _settings.HpBars);
         _renderer.Render(ctx);
 
         // Make the overlay grab clicks only while the cursor is over a clickable legend row;

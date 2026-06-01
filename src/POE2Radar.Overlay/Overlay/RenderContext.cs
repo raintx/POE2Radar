@@ -1,4 +1,5 @@
 using POE2Radar.Core.Game;
+using POE2Radar.Overlay.Config;
 using NumVec2 = System.Numerics.Vector2;
 
 namespace POE2Radar.Overlay;
@@ -66,4 +67,7 @@ public sealed record RenderContext(
     IReadOnlyList<LegendEntry> Legend,
     // ── Collapsible "POE2Radar" navigation-menu widget (always drawn when Active+InGame). ──
     bool NavMenuExpanded,         // dropdown open?
-    string NavMenuCorner);        // pinned corner: TopLeft/TopRight/BottomLeft/BottomRight
+    string NavMenuCorner,         // pinned corner: TopLeft/TopRight/BottomLeft/BottomRight
+    // ── User-tweakable icon style table + HP-bar geometry (mirrored from RadarSettings). ──
+    RadarStyles Styles,
+    HpBarSettings HpBars);
