@@ -24,7 +24,17 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, EntityCategory> _category = new();
     private readonly Dictionary<nint, string> _meta = new();
     private readonly Dictionary<nint, bool> _hasIcon = new();      // entity has a MinimapIcon component (game POI)
+    private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
     private nint _entCacheKey;   // AreaInstance address the entity caches were built for
+
+    // Reused across Entities() calls (tick thread only) to avoid per-tick allocations. The std::map
+    // walk reads each 48-byte node in ONE ReadProcessMemory (fields are contiguous), not 5 syscalls.
+    private readonly Queue<nint> _entQueue = new();
+    private readonly HashSet<nint> _entVisited = new();
+    private readonly byte[] _nodeBuf = new byte[0x30];
+    // Reused camera-matrix buffers (read every render frame).
+    private readonly byte[] _camBytes = new byte[64];
+    private readonly float[] _camMatrix = new float[16];
 
     public Poe2Live(MemoryReader reader, nint gameStateSlot)
     {
@@ -174,7 +184,7 @@ public sealed class Poe2Live
         if (areaInstance != _entCacheKey)
         {
             _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear(); _chestAddr.Clear();
-            _category.Clear(); _meta.Clear(); _hasIcon.Clear();
+            _category.Clear(); _meta.Clear(); _hasIcon.Clear(); _rarity.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -184,18 +194,22 @@ public sealed class Poe2Live
         if (head == 0 || size <= 0 || size > 100000) return dots;
 
         var root = Ptr(head + Poe2.StdMapNode.Parent);
-        var queue = new Queue<nint>(); queue.Enqueue(root);
-        var visited = new HashSet<nint>();
-        while (queue.Count > 0 && visited.Count < 200000)
+        _entQueue.Clear(); _entQueue.Enqueue(root);
+        _entVisited.Clear();
+        while (_entQueue.Count > 0 && _entVisited.Count < 200000)
         {
-            var node = queue.Dequeue();
-            if (node == 0 || node == head || !visited.Add(node)) continue;
-            if (!_reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+            var node = _entQueue.Dequeue();
+            if (node == 0 || node == head || !_entVisited.Add(node)) continue;
 
-            _reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
-            var entity = Ptr(node + Poe2.StdMapNode.ValueEntityPtr);
-            queue.Enqueue(Ptr(node + Poe2.StdMapNode.Left));
-            queue.Enqueue(Ptr(node + Poe2.StdMapNode.Right));
+            // One read for the whole node — Left/Right/IsNil/KeyId/ValueEntityPtr are contiguous in
+            // 48 bytes, so this replaces 5 separate ReadProcessMemory syscalls per node with one.
+            if (_reader.TryReadBytes(node, _nodeBuf) < _nodeBuf.Length) continue;
+            if (_nodeBuf[Poe2.StdMapNode.IsNil] != 0) continue; // sentinel/nil — don't traverse its children
+
+            var id = BitConverter.ToUInt32(_nodeBuf, Poe2.StdMapNode.KeyId);
+            var entity = (nint)BitConverter.ToInt64(_nodeBuf, Poe2.StdMapNode.ValueEntityPtr);
+            _entQueue.Enqueue((nint)BitConverter.ToInt64(_nodeBuf, Poe2.StdMapNode.Left));
+            _entQueue.Enqueue((nint)BitConverter.ToInt64(_nodeBuf, Poe2.StdMapNode.Right));
 
             if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
             var world = EntityWorld(entity);
@@ -227,15 +241,19 @@ public sealed class Poe2Live
 
     private Rarity ReadRarity(nint entity)
     {
+        // Rarity is fixed at spawn — read it once per entity and cache the value (not just the addr).
+        if (_rarity.TryGetValue(entity, out var cached)) return cached;
         if (!_ompAddr.TryGetValue(entity, out var omp))
         {
             omp = ResolveComponent(entity, "ObjectMagicProperties");
             _ompAddr[entity] = omp;
         }
-        if (omp == 0) return Rarity.Normal;
-        if (!_reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var r) || r is < 0 or > 3)
-            return Rarity.Normal;
-        return (Rarity)r;
+        if (omp == 0) { _rarity[entity] = Rarity.Normal; return Rarity.Normal; }
+        if (!_reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var r))
+            return Rarity.Normal; // transient read failure — don't poison the cache
+        var rarity = r is >= 0 and <= 3 ? (Rarity)r : Rarity.Normal;
+        _rarity[entity] = rarity;
+        return rarity;
     }
 
     private byte ReadReaction(nint entity)
@@ -505,11 +523,10 @@ public sealed class Poe2Live
     {
         var cam = Ptr(inGameState + Poe2.InGameState.Camera);
         if (cam == 0) return null;
-        var b = new byte[64];
-        if (_reader.TryReadBytes(cam + Poe2.Camera.WorldToScreenMatrix, b) != 64) return null;
-        var m = new float[16];
-        System.Buffer.BlockCopy(b, 0, m, 0, 64);
-        return m;
+        // Reuse the buffers — this runs every render frame; the result is consumed synchronously.
+        if (_reader.TryReadBytes(cam + Poe2.Camera.WorldToScreenMatrix, _camBytes) != 64) return null;
+        System.Buffer.BlockCopy(_camBytes, 0, _camMatrix, 0, 64);
+        return _camMatrix;
     }
 
     private EntityCategory Categorize(nint entity)

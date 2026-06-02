@@ -20,6 +20,12 @@ public sealed class RadarSettings
     public bool ShowMonsters { get; set; } = true;
     public bool ShowTerrain { get; set; } = true;
 
+    // ── Overlay render/present rate (Hz). The overlay redraws + UpdateLayeredWindow-blits at this
+    //    rate; lower = less CPU/GPU tax on the game (the blit cost is proportional to resolution).
+    //    60 is plenty smooth for a radar; raise toward your monitor's refresh if you prefer. The
+    //    heavier entity/terrain walk stays fixed at ~30 Hz regardless. ──
+    public int FpsCap { get; set; } = 60;
+
     // ── Navigation-menu widget: which screen corner it is pinned to.
     //    One of "TopLeft", "TopRight", "BottomLeft", "BottomRight". ──
     public string NavMenuCorner { get; set; } = "TopLeft";

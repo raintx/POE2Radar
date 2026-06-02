@@ -13,12 +13,12 @@ namespace POE2Radar.Overlay;
 
 /// <summary>
 /// Drives the PoE2 radar: per-tick resolve chain → read player/entities/terrain/map → render.
-/// Read-only. Render rate ~144 Hz (player blip tracks live); the heavier entity/terrain walk
-/// runs at ~30 Hz. Projection scale/offset are tweakable live via hotkeys for calibration.
+/// Read-only. Render rate is configurable (RadarSettings.FpsCap, default 60 Hz; player blip tracks
+/// live); the heavier entity/terrain walk runs at ~30 Hz. Projection scale/offset are tweakable live
+/// via hotkeys for calibration.
 /// </summary>
 public sealed class RadarApp : IDisposable
 {
-    private const int TargetHz = 144;
     private const int WorldHz = 30;
 
     private readonly ProcessHandle _process;
@@ -51,6 +51,14 @@ public sealed class RadarApp : IDisposable
     private string _areaCode = "", _charName = "";
     private int _charLevel;
     private float[]? _cameraMatrix;
+
+    // Render inputs rebuilt at world rate (30 Hz), not per render frame: they only change with the
+    // selection / nav-target list. _overlayHadContent gates the present so we skip the (resolution-
+    // proportional) UpdateLayeredWindow blit while PoE2 isn't foreground — but still push ONE blank
+    // frame on focus-loss so a stale overlay never lingers over other apps.
+    private List<string> _selectedSnapshot = new();
+    private IReadOnlyList<LegendEntry> _legend = Array.Empty<LegendEntry>();
+    private bool _overlayHadContent;
 
     // ── Phase 1: exploration fog + draw-only path guidance (all gated by RadarSettings flags). ──
     // Unified navigation targets: a single list built each world tick from BOTH terrain-tile
@@ -105,7 +113,6 @@ public sealed class RadarApp : IDisposable
 
     public void Run()
     {
-        var targetMs = 1000 / TargetHz;
         _gameHwnd = OverlayNative.FindWindowForProcess(_process.ProcessId);
         while (!_shutdown)
         {
@@ -113,7 +120,10 @@ public sealed class RadarApp : IDisposable
             if (_gameHwnd != 0) _window.TrackGameWindow(_gameHwnd);
             if (!_window.PumpMessages()) break;
             Tick();
-            Thread.Sleep(targetMs);
+            // Configurable frame budget (read live so dashboard edits apply immediately). The world
+            // walk is independently throttled to WorldHz inside Tick().
+            var hz = Math.Clamp(_settings.FpsCap, 15, 360);
+            Thread.Sleep(Math.Max(1, 1000 / hz));
         }
     }
 
@@ -165,6 +175,11 @@ public sealed class RadarApp : IDisposable
                 // target: cheaply advance its cursor; fire a BACKGROUND replan only on a real trigger.
                 // Then drain finished routes and rebuild _selectedPaths from the trackers' cursors.
                 MaintainRoutes(player);
+
+                // Selection snapshot + legend are render inputs that change only with the selection /
+                // nav-target list — rebuild them here (30 Hz) rather than every render frame.
+                _selectedSnapshot = SnapshotSelection();
+                _legend = BuildLegend(_selectedSnapshot);
             }
         }
         else
@@ -174,11 +189,6 @@ public sealed class RadarApp : IDisposable
 
         _state = new RadarState(inGame, _areaHash, areaLevel, map.IsVisible, map.Zoom, player, _entities, _landmarks,
             _hpPct, _manaPct, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel);
-
-        // Snapshot the selection ONCE per frame (under the lock) into a set the render path can probe
-        // freely without holding the lock during the (longer) render. The API thread may be mutating
-        // _selectedIds concurrently; this captures a consistent view for this frame.
-        var selectedSnapshot = SnapshotSelection();
 
         var ctx = new RenderContext(
             InGame: inGame,
@@ -210,14 +220,21 @@ public sealed class RadarApp : IDisposable
             HpBarRare: _settings.HpBarRare,
             HpBarUnique: _settings.HpBarUnique,
             SelectedPaths: _selectedPaths,
-            IsSelected: selectedSnapshot.Contains,
-            Legend: BuildLegend(selectedSnapshot),
+            IsSelected: _selectedSnapshot.Contains,
+            Legend: _legend,
             NavMenuExpanded: _navMenuExpanded,
             NavMenuCorner: _settings.NavMenuCorner,
             Styles: _settings.Styles,
             HpBars: _settings.HpBars,
             TerrainStyle: _settings.Terrain);
-        _renderer.Render(ctx);
+        // The overlay is only visible while PoE2 is foreground (Render draws nothing otherwise). Skip
+        // the whole draw + UpdateLayeredWindow blit when unfocused — but render once on the focus-loss
+        // transition so the last visible frame is cleared rather than left frozen on screen.
+        if (ctx.Active || _overlayHadContent)
+        {
+            _renderer.Render(ctx);
+            _overlayHadContent = ctx.Active;
+        }
 
         // Make the overlay grab clicks only while the cursor is over a clickable legend row;
         // otherwise stay click-through so the game receives the clicks. Runs after Render so
