@@ -27,6 +27,13 @@ namespace POE2Radar.Overlay.Web;
 ///   GET  /api/nav                 — current navigation-target selection (ids + color slots)
 ///   POST /api/nav                 — toggle/clear a navigation target (draw-only; never sends input to
 ///                                   the game); loopback-Host-gated like POST /api/settings
+///   GET  /api/hidden              — user cull patterns (entities matching these are hidden everywhere)
+///   POST /api/hidden              — add/remove/clear a cull pattern ({add|remove|clear}); loopback-Host-gated
+///   GET  /api/watched             — user highlight rules (pattern/label/color/shape/size/enabled)
+///   POST /api/watched             — add/update/remove a highlight rule; loopback-Host-gated
+///   GET  /api/zone                — static zone reference: friendly name, act/level, flags, leveling notes
+///   GET  /api/landmark-patterns   — user tile-path patterns surfaced as landmarks (pattern/label/enabled)
+///   POST /api/landmark-patterns   — add/update/remove a landmark pattern; loopback-Host-gated
 /// </summary>
 public sealed class ApiServer : IDisposable
 {
@@ -38,6 +45,9 @@ public sealed class ApiServer : IDisposable
     private readonly Func<IReadOnlyList<(string Id, int Slot)>> _navGet;
     private readonly Action<string> _navToggle;
     private readonly Action _navClear;
+    private readonly HiddenEntities _hidden;
+    private readonly WatchedEntities _watched;
+    private readonly LandmarkPatterns _landmarks;
     private volatile bool _running;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -48,6 +58,9 @@ public sealed class ApiServer : IDisposable
         Func<IReadOnlyList<(string Id, int Slot)>> navGet,
         Action<string> navToggle,
         Action navClear,
+        HiddenEntities hidden,
+        WatchedEntities watched,
+        LandmarkPatterns landmarks,
         int port = 7777)
     {
         _state = state;
@@ -55,6 +68,9 @@ public sealed class ApiServer : IDisposable
         _navGet = navGet;
         _navToggle = navToggle;
         _navClear = navClear;
+        _hidden = hidden;
+        _watched = watched;
+        _landmarks = landmarks;
         _listener.Prefixes.Add($"http://localhost:{port}/");
     }
 
@@ -103,6 +119,8 @@ public sealed class ApiServer : IDisposable
                     // Character name + level intentionally omitted (privacy: this endpoint is local
                     // but unauthenticated, and screenshots/streams shouldn't leak the character).
                     s.InGame, areaCode = s.AreaCode, areaHash = s.AreaHash, areaLevel = s.AreaLevel,
+                    areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
+                    areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
                     hpPct = s.HpPct, manaPct = s.ManaPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
@@ -155,6 +173,7 @@ public sealed class ApiServer : IDisposable
                     .Select(e => new
                     {
                         id = e.Id, addr = $"0x{e.Address:X}", category = e.Category.ToString(), metadata = e.Metadata,
+                        name = EntityNameResolver.Shared.ResolveOrShorten(e.Metadata),
                         poi = e.Poi, reaction = e.Reaction, friendly = e.IsFriendly, rarity = e.Rarity.ToString(),
                         x = e.Grid.X, y = e.Grid.Y, hpCur = e.HpCur, hpMax = e.HpMax,
                         alive = e.HpMax <= 0 || e.HpCur > 0,
@@ -217,6 +236,96 @@ public sealed class ApiServer : IDisposable
                 break;
             }
 
+            case "/api/hidden":
+            {
+                if (ctx.Request.HttpMethod == "GET")
+                {
+                    Write(ctx, 200, JsonSerializer.Serialize(new { patterns = _hidden.All }, Json));
+                }
+                else if (ctx.Request.HttpMethod == "POST")
+                {
+                    // Same CSRF / DNS-rebinding guard as the other writes: loopback Host only.
+                    if (!IsLoopbackHost(ctx.Request))
+                    {
+                        Write(ctx, 403, JsonSerializer.Serialize(new { error = "forbidden host" }, Json));
+                        break;
+                    }
+                    ApplyHidden(ReadBody(ctx));
+                    Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, patterns = _hidden.All }, Json));
+                }
+                else
+                {
+                    Write(ctx, 405, JsonSerializer.Serialize(new { error = "method not allowed" }, Json));
+                }
+                break;
+            }
+
+            case "/api/landmark-patterns":
+            {
+                if (ctx.Request.HttpMethod == "GET")
+                {
+                    Write(ctx, 200, JsonSerializer.Serialize(new { patterns = _landmarks.All }, Json));
+                }
+                else if (ctx.Request.HttpMethod == "POST")
+                {
+                    if (!IsLoopbackHost(ctx.Request))
+                    {
+                        Write(ctx, 403, JsonSerializer.Serialize(new { error = "forbidden host" }, Json));
+                        break;
+                    }
+                    ApplyLandmarkPatterns(ReadBody(ctx));
+                    Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, patterns = _landmarks.All }, Json));
+                }
+                else
+                {
+                    Write(ctx, 405, JsonSerializer.Serialize(new { error = "method not allowed" }, Json));
+                }
+                break;
+            }
+
+            case "/api/zone":
+            {
+                // Static zone reference for the current area: friendly name, act/level, flags, and
+                // optional leveling notes (zone-specific, else act fallback). Read-only.
+                var area = ZoneGuide.Shared.Area(s.AreaCode);
+                var notes = ZoneGuide.Shared.Notes(s.AreaCode);
+                Write(ctx, 200, JsonSerializer.Serialize(new
+                {
+                    code = s.AreaCode,
+                    name = ZoneGuide.Shared.FriendlyName(s.AreaCode),
+                    act = area?.Act ?? 0,
+                    level = area?.Level ?? s.AreaLevel,
+                    waypoint = area?.Waypoint ?? false,
+                    town = area?.Town ?? false,
+                    title = notes?.Title ?? "",
+                    notes = notes?.Notes ?? "",
+                }, Json));
+                break;
+            }
+
+            case "/api/watched":
+            {
+                if (ctx.Request.HttpMethod == "GET")
+                {
+                    Write(ctx, 200, JsonSerializer.Serialize(new { rules = _watched.All }, Json));
+                }
+                else if (ctx.Request.HttpMethod == "POST")
+                {
+                    if (!IsLoopbackHost(ctx.Request))
+                    {
+                        Write(ctx, 403, JsonSerializer.Serialize(new { error = "forbidden host" }, Json));
+                        break;
+                    }
+                    ApplyWatched(ReadBody(ctx));
+                    Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, rules = _watched.All }, Json));
+                }
+                else
+                {
+                    Write(ctx, 405, JsonSerializer.Serialize(new { error = "method not allowed" }, Json));
+                }
+                break;
+            }
+
             default:
                 Write(ctx, 404, JsonSerializer.Serialize(new { error = "not found", path }, Json));
                 break;
@@ -234,8 +343,10 @@ public sealed class ApiServer : IDisposable
         hideJunk = _settings.HideJunk,
         showPath = _settings.ShowPath,
         useCuratedLandmarks = _settings.UseCuratedLandmarks,
+        autoNavPatterns = _settings.AutoNavPatterns,
         showMonsters = _settings.ShowMonsters,
         showTerrain = _settings.ShowTerrain,
+        showPlayerBlip = _settings.ShowPlayerBlip,
         fpsCap = _settings.FpsCap,
         hpBarNormal = _settings.HpBarNormal,
         hpBarMagic = _settings.HpBarMagic,
@@ -278,6 +389,7 @@ public sealed class ApiServer : IDisposable
                 case "offY" when TryFloat(p.Value, out var f): _settings.OffY = f; applied.Add(p.Name); break;
                 case "showMonsters" when TryBool(p.Value, out var b): _settings.ShowMonsters = b; applied.Add(p.Name); break;
                 case "showTerrain" when TryBool(p.Value, out var b): _settings.ShowTerrain = b; applied.Add(p.Name); break;
+                case "showPlayerBlip" when TryBool(p.Value, out var b): _settings.ShowPlayerBlip = b; applied.Add(p.Name); break;
                 case "fpsCap" when TryInt(p.Value, out var n): _settings.FpsCap = Math.Clamp(n, 15, 360); applied.Add(p.Name); break;
                 case "hpBarNormal" when TryBool(p.Value, out var b): _settings.HpBarNormal = b; applied.Add(p.Name); break;
                 case "hpBarMagic" when TryBool(p.Value, out var b): _settings.HpBarMagic = b; applied.Add(p.Name); break;
@@ -299,6 +411,18 @@ public sealed class ApiServer : IDisposable
                     break;
                 case "terrain" when p.Value.ValueKind == JsonValueKind.Object:
                     if (TryParseTerrain(p.Value, out var terrain)) { _settings.Terrain = terrain; applied.Add(p.Name); }
+                    break;
+                // Persistent auto-nav patterns (string list). Replaces the whole list with a sanitized,
+                // deduped, capped copy — assigned as a fresh reference so the tick thread's iteration
+                // never sees a partially-mutated list.
+                case "autoNavPatterns" when p.Value.ValueKind == JsonValueKind.Array:
+                    _settings.AutoNavPatterns = p.Value.EnumerateArray()
+                        .Where(x => x.ValueKind == JsonValueKind.String)
+                        .Select(x => (x.GetString() ?? "").Trim())
+                        .Where(x => x.Length is > 0 and <= 64)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Take(32).ToList();
+                    applied.Add(p.Name);
                     break;
                 // Anything else (apiPort, unknown keys) is ignored by design.
             }
@@ -431,6 +555,128 @@ public sealed class ApiServer : IDisposable
         {
             var id = toggle.GetString();
             if (!string.IsNullOrEmpty(id)) _navToggle(id);
+        }
+    }
+
+    /// <summary>Apply a posted hidden-list command: {"add":"&lt;pattern&gt;"} adds a cull pattern,
+    /// {"remove":"&lt;pattern&gt;"} removes one, {"clear":true} clears all. A pattern may be a literal
+    /// substring or a <c>*</c>/<c>?</c> glob. Affects only what the overlay draws/serves — never the game.</summary>
+    private void ApplyHidden(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return;
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return;
+
+        if (root.TryGetProperty("clear", out var clear) && clear.ValueKind == JsonValueKind.True)
+        {
+            _hidden.Clear();
+            return;
+        }
+        if (root.TryGetProperty("add", out var add) && add.ValueKind == JsonValueKind.String)
+        {
+            var p = add.GetString();
+            if (!string.IsNullOrWhiteSpace(p)) _hidden.Add(p);
+        }
+        if (root.TryGetProperty("remove", out var remove) && remove.ValueKind == JsonValueKind.String)
+        {
+            var p = remove.GetString();
+            if (!string.IsNullOrWhiteSpace(p)) _hidden.Remove(p);
+        }
+    }
+
+    /// <summary>Apply a posted watched-list command. Shapes:
+    /// <list type="bullet">
+    /// <item>{"add":{"pattern","label","color","size"?,"shape"?}} — create/replace a rule</item>
+    /// <item>{"update":{"pattern","label"?,"color"?,"enabled"?,"size"?,"shape"?}} — edit fields</item>
+    /// <item>{"remove":"&lt;pattern&gt;"} — delete a rule</item>
+    /// </list>
+    /// Inputs are sanitized (color → #RRGGBB, shape → a known icon, size clamped). Highlight-only —
+    /// never touches the game.</summary>
+    private void ApplyWatched(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return;
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return;
+
+        if (root.TryGetProperty("remove", out var rem) && rem.ValueKind == JsonValueKind.String)
+        {
+            var p = rem.GetString();
+            if (!string.IsNullOrWhiteSpace(p)) _watched.Remove(p);
+        }
+
+        if (root.TryGetProperty("add", out var add) && add.ValueKind == JsonValueKind.Object)
+        {
+            var pattern = Str(add, "pattern");
+            if (!string.IsNullOrWhiteSpace(pattern))
+                _watched.Add(pattern!.Trim(), Str(add, "label") ?? "",
+                    SanitizeColor(Str(add, "color")), SanitizeSize(add, 7f), SanitizeShape(Str(add, "shape")));
+        }
+
+        if (root.TryGetProperty("update", out var upd) && upd.ValueKind == JsonValueKind.Object)
+        {
+            var pattern = Str(upd, "pattern");
+            if (!string.IsNullOrWhiteSpace(pattern))
+            {
+                bool? enabled = upd.TryGetProperty("enabled", out var en) && TryBool(en, out var b) ? b : null;
+                float? size = upd.TryGetProperty("size", out var sz) && TryFloat(sz, out var f) ? Math.Clamp(f, 0.5f, 40f) : null;
+                var color = upd.TryGetProperty("color", out _) ? SanitizeColor(Str(upd, "color")) : null;
+                var shape = upd.TryGetProperty("shape", out _) ? SanitizeShape(Str(upd, "shape")) : null;
+                _watched.Update(pattern!.Trim(), label: Str(upd, "label"), color: color,
+                    enabled: enabled, size: size, shape: shape);
+            }
+        }
+    }
+
+    private static string? Str(JsonElement o, string name)
+        => o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static string SanitizeColor(string? c)
+        => c != null && HexColor.IsMatch(c) ? c.ToUpperInvariant() : "#FFFFFF";
+
+    private static string SanitizeShape(string? s)
+        => IconLibrary.Canonical(s ?? "") ?? "Diamond";
+
+    private static float SanitizeSize(JsonElement o, float fallback)
+        => o.TryGetProperty("size", out var v) && TryFloat(v, out var f) ? Math.Clamp(f, 0.5f, 40f) : fallback;
+
+    /// <summary>Apply a posted landmark-pattern command. Shapes:
+    /// <list type="bullet">
+    /// <item>{"add":{"pattern","label"?}} — surface tiles whose path contains pattern (blank label = derived name)</item>
+    /// <item>{"update":{"pattern","label"?,"enabled"?}}</item>
+    /// <item>{"remove":"&lt;pattern&gt;"}</item>
+    /// </list>
+    /// Affects only which terrain tiles the overlay surfaces as landmarks — never the game.</summary>
+    private void ApplyLandmarkPatterns(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return;
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return;
+
+        if (root.TryGetProperty("remove", out var rem) && rem.ValueKind == JsonValueKind.String)
+        {
+            var p = rem.GetString();
+            if (!string.IsNullOrWhiteSpace(p)) _landmarks.Remove(p);
+        }
+        if (root.TryGetProperty("add", out var add) && add.ValueKind == JsonValueKind.Object)
+        {
+            var pattern = Str(add, "pattern");
+            if (!string.IsNullOrWhiteSpace(pattern)) _landmarks.Add(pattern!.Trim(), (Str(add, "label") ?? "").Trim());
+        }
+        if (root.TryGetProperty("update", out var upd) && upd.ValueKind == JsonValueKind.Object)
+        {
+            var pattern = Str(upd, "pattern");
+            if (!string.IsNullOrWhiteSpace(pattern))
+            {
+                bool? enabled = upd.TryGetProperty("enabled", out var en) && TryBool(en, out var b) ? b : null;
+                var label = upd.TryGetProperty("label", out _) ? (Str(upd, "label") ?? "") : null;
+                _landmarks.Update(pattern!.Trim(), label: label, enabled: enabled);
+            }
         }
     }
 

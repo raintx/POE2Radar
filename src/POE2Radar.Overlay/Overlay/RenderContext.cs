@@ -54,6 +54,7 @@ public sealed record RenderContext(
     // Radar display toggles.
     bool ShowMonsters,
     bool ShowTerrain,
+    bool ShowPlayerBlip,
     // Monster HP-bar (nameplate) toggles by rarity.
     bool HpBarNormal,
     bool HpBarMagic,
@@ -72,4 +73,7 @@ public sealed record RenderContext(
     RadarStyles Styles,
     HpBarSettings HpBars,
     // Walkable-terrain bitmap colors/transparency (mirrored from RadarSettings).
-    TerrainSettings TerrainStyle);
+    TerrainSettings TerrainStyle,
+    // User "watched" highlight matcher: metadata → the first enabled watch rule it matches (or null).
+    // Force-draws the matched entity in the rule's color/shape/size and draws its label. May be null.
+    Func<string, Web.WatchedEntry?>? WatchedMatch);

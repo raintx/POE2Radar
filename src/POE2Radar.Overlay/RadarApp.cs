@@ -28,7 +28,14 @@ public sealed class RadarApp : IDisposable
     private readonly OverlayRenderer _renderer;
     private readonly ApiServer _api;
     private readonly RadarSettings _settings;
+    private readonly HiddenEntities _hidden;
+    private readonly WatchedEntities _watched;
+    private readonly LandmarkPatterns _landmarkPatterns;
+    private int _landmarkGen;
     private volatile RadarState _state = RadarState.Empty;
+
+    /// <summary>Directory holding the user config files (shared with <see cref="RadarSettings"/>).</summary>
+    private static string ConfigDir => Path.Combine(AppContext.BaseDirectory, "config");
 
     private DateTime _worldAt = DateTime.MinValue;
     private List<Poe2Live.EntityDot> _entities = new();
@@ -98,13 +105,22 @@ public sealed class RadarApp : IDisposable
         _reader = reader;
         _settings = RadarSettings.Load();
         Console.WriteLine($"Settings: {RadarSettings.FilePath}");
+        Console.WriteLine($"Entity names: {EntityNameResolver.Shared.Count} mappings; zones: {ZoneGuide.Shared.Count}");
         _live = new Poe2Live(reader, gameStateSlot);
         _window = OverlayWindow.Create();
         _renderer = new OverlayRenderer(_window);
         // Clicking a legend row toggles that landmark in the path selection. Purely local UI — the
         // click lands on our own overlay window (never forwarded to the game). See UpdateClickThrough.
         _window.OnClientClick = OnOverlayClick;
-        _api = new ApiServer(() => _state, _settings, GetNavSelection, ToggleNavTarget, ClearNavSelection, _settings.ApiPort);
+        _hidden = new HiddenEntities(Path.Combine(ConfigDir, "hidden_entities.json"));
+        _watched = new WatchedEntities(Path.Combine(ConfigDir, "watched_entities.json"));
+        _landmarkPatterns = new LandmarkPatterns(Path.Combine(ConfigDir, "landmark_patterns.json"));
+        _live.CustomLandmarkMatch = _landmarkPatterns.Match; // surface user tile patterns as landmarks
+        _landmarkGen = _landmarkPatterns.Generation;
+        Console.WriteLine($"Hidden entities: {_hidden.Count} pattern(s); watched: {_watched.All.Count} rule(s); "
+                          + $"landmark patterns: {_landmarkPatterns.All.Count}");
+        _api = new ApiServer(() => _state, _settings, GetNavSelection, ToggleNavTarget, ClearNavSelection,
+                             _hidden, _watched, _landmarkPatterns, _settings.ApiPort);
         try { _api.Start(); Console.WriteLine($"API on http://localhost:{_settings.ApiPort} (dashboard at /)"); }
         catch (Exception ex) { Console.Error.WriteLine($"API server disabled: {ex.Message}"); }
         Console.WriteLine("Hotkeys: F6=add nearest path target  F7=clear path targets  "
@@ -157,6 +173,17 @@ public sealed class RadarApp : IDisposable
                 _worldAt = now;
                 _terrain ??= _live.Terrain(areaInstance);
                 _entities = _live.Entities(areaInstance);
+                // Drop user-hidden entities once, here — so the renderer, nav-target builder, and the
+                // published RadarState (HTTP API) all see the same filtered list. Cull by metadata.
+                if (_hidden.Count > 0)
+                    _entities = _entities.Where(e => !_hidden.IsHidden(e.Metadata)).ToList();
+                // If the user edited the custom landmark patterns, drop the cached per-area scan so it
+                // rebuilds with the new patterns this tick (otherwise it only refreshes on zone change).
+                if (_landmarkPatterns.Generation != _landmarkGen)
+                {
+                    _landmarkGen = _landmarkPatterns.Generation;
+                    _live.InvalidateLandmarks();
+                }
                 _landmarks = _live.Landmarks(areaInstance); // cached per area in Poe2Live
 
                 // Rebuild the unified navigation-target list (tiles + entity POIs) for this tick.
@@ -215,6 +242,7 @@ public sealed class RadarApp : IDisposable
             UseCuratedLandmarks: _settings.UseCuratedLandmarks,
             ShowMonsters: _settings.ShowMonsters,
             ShowTerrain: _settings.ShowTerrain,
+            ShowPlayerBlip: _settings.ShowPlayerBlip,
             HpBarNormal: _settings.HpBarNormal,
             HpBarMagic: _settings.HpBarMagic,
             HpBarRare: _settings.HpBarRare,
@@ -226,7 +254,8 @@ public sealed class RadarApp : IDisposable
             NavMenuCorner: _settings.NavMenuCorner,
             Styles: _settings.Styles,
             HpBars: _settings.HpBars,
-            TerrainStyle: _settings.Terrain);
+            TerrainStyle: _settings.Terrain,
+            WatchedMatch: _watched.Match);
         // The overlay is only visible while PoE2 is foreground (Render draws nothing otherwise). Skip
         // the whole draw + UpdateLayeredWindow blit when unfocused — but render once on the focus-loss
         // transition so the last visible frame is cleared rather than left frozen on screen.
@@ -697,6 +726,12 @@ public sealed class RadarApp : IDisposable
     private static string EntityLabel(string metadata)
     {
         if (string.IsNullOrEmpty(metadata)) return "(entity)";
+
+        // Prefer a curated friendly name from the entity-name table when one exists
+        // (e.g. "Lightning Wraith"); fall back to the path-derived prettifier below.
+        if (EntityNameResolver.Shared.Resolve(metadata) is { Length: > 0 } resolved)
+            return resolved;
+
         var slash = metadata.LastIndexOf('/');
         var seg = slash >= 0 ? metadata[(slash + 1)..] : metadata;
 

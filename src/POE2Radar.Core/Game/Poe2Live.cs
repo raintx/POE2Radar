@@ -282,6 +282,17 @@ public sealed class Poe2Live
     private List<Landmark>? _landmarks;
     private nint _landmarksKey = -1;
 
+    /// <summary>Optional Overlay-supplied matcher: given a tile path, returns a friendly label (possibly
+    /// empty) when the user wants that tile surfaced as a landmark, or null to ignore it. Lets users add
+    /// their own landmark/tile patterns at runtime on top of the built-in keyword filter + curated list.
+    /// Set by RadarApp; call <see cref="InvalidateLandmarks"/> after the pattern set changes so the
+    /// per-area scan cache rebuilds.</summary>
+    public Func<string, string?>? CustomLandmarkMatch { get; set; }
+
+    /// <summary>Drop the cached per-area landmark scan so the next <see cref="Landmarks"/> call rebuilds
+    /// it (e.g. after the user edits the custom landmark patterns from the dashboard).</summary>
+    public void InvalidateLandmarks() => _landmarksKey = -1;
+
     /// <summary>
     /// Static tile-based landmarks for the area (boss arenas, treasure, waypoints, mechanics…).
     /// Scans the terrain tile grid once per area (cached): each tile's TgtPath, grouped by path
@@ -323,10 +334,12 @@ public sealed class Poe2Live
             {
                 var p = ReadStdWString(tgtFile + Poe2.TgtFileStruct.TgtPath);
                 // Surface a tile as a navigable landmark if the curated community list names it for
-                // this area, OR it matches the generic keyword filter (fallback for uncurated areas).
-                // The curated list is the primary whitelist: it covers area transitions, vendors, NPCs,
-                // etc. whose tile paths carry none of the keywords.
-                var keep = CustomLandmarkData.TryMatch(areaCode, p) != null || IsInterestingLandmark(p);
+                // this area, OR it matches the generic keyword filter (fallback for uncurated areas),
+                // OR it matches a user-defined custom landmark pattern (dashboard-editable). The curated
+                // list is the primary whitelist: it covers area transitions, vendors, NPCs, etc. whose
+                // tile paths carry none of the keywords.
+                var keep = CustomLandmarkData.TryMatch(areaCode, p) != null || IsInterestingLandmark(p)
+                           || CustomLandmarkMatch?.Invoke(p) != null;
                 path = keep ? p : null;
                 pathCache[tgtFile] = path;
             }
@@ -342,15 +355,25 @@ public sealed class Poe2Live
         foreach (var (path, n) in num)
             result.Add(new Landmark(LandmarkName(path), path,
                 new System.Numerics.Vector2((float)(sumX[path] / n), (float)(sumY[path] / n)), n,
-                CustomLandmarkData.TryMatch(areaCode, path)));
+                // Curated label wins; else a non-empty user label; else null (derived name shows).
+                CustomLandmarkData.TryMatch(areaCode, path) ?? NonEmpty(CustomLandmarkMatch?.Invoke(path))));
         return result;
     }
+
+    /// <summary>Null for null/empty, else the string — so an empty user label means "surface but use the
+    /// path-derived name" rather than showing a blank curated label.</summary>
+    private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
 
     private static bool IsInterestingLandmark(string p)
     {
         if (string.IsNullOrEmpty(p)) return false;
+        // "leagues" catches league-mechanic terrain features generically (their tile paths live under
+        // Metadata/Terrain/Leagues/<Mechanic>/…) — e.g. the Incursion Waygate device — so they surface
+        // as position-independent tile landmarks like any boss arena / waypoint. The named keywords
+        // cover the staple static features (and a few explicit league terms as belt-and-braces).
         foreach (var kw in new[] { "arena", "boss", "treasure", "waypoint", "encounter", "ritual",
-                                   "vault", "reward", "unique", "checkpoint", "altar", "shrine" })
+                                   "vault", "reward", "unique", "checkpoint", "altar", "shrine",
+                                   "leagues", "waygate", "incursion", "expedition", "breach", "delirium" })
             if (p.Contains(kw, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }

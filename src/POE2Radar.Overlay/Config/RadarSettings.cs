@@ -19,6 +19,8 @@ public sealed class RadarSettings
     // ── Radar display toggles. ──
     public bool ShowMonsters { get; set; } = true;
     public bool ShowTerrain { get; set; } = true;
+    // The player position blip at map-center. Default on (prior behavior); some prefer it off.
+    public bool ShowPlayerBlip { get; set; } = true;
 
     // ── Overlay render/present rate (Hz). The overlay redraws + UpdateLayeredWindow-blits at this
     //    rate; lower = less CPU/GPU tax on the game (the blit cost is proportional to resolution).

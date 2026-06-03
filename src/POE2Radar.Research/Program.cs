@@ -48,6 +48,9 @@ if (HasFlag(args, "--tiles"))
 if (HasFlag(args, "--rarity"))
     return RunRarity(process, reader);
 
+if (HasFlag(args, "--validate"))
+    return RunValidate(process, reader, TryGetIntArg(args, "--n") ?? 6);
+
 if (HasFlag(args, "--info"))
     return RunInfo(process, reader);
 
@@ -532,6 +535,144 @@ static int RunRarity(ProcessHandle process, MemoryReader reader)
             Console.WriteLine($"  +0x{o:X3}: values {{{string.Join(",", set.OrderBy(x => x))}}}");
     return 0;
 }
+
+// ── Validate the read-only fork ports against the live client in one pass ──────────────────
+// Confirms (1) ZoneGuide area-name resolution, (2) EntityNameResolver entity names, and (3) the
+// transcribed ✗ component offsets (Chest.Locked/Large, Monster.IsBoss, Targetable, Pathfinding.
+// BaseSpeed, AreaTransition timers). Read-only: walks entities, resolves components, dumps the
+// candidate offsets + a hex window so the values can be eyeballed against known ground truth.
+static int RunValidate(ProcessHandle process, MemoryReader reader, int perBucket)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    // (1) ZoneGuide: raw area code → friendly name / act / level.
+    var areaInfo = SafePtr(reader, ai + Poe2.AreaInstance.AreaInfoPtr);
+    var code = reader.ReadStringUtf16(SafePtr(reader, areaInfo), 64);
+    var za = ZoneGuide.Shared.Area(code);
+    Console.WriteLine("=== ZoneGuide ===");
+    Console.WriteLine($"  areaCode = '{code}'  →  name='{ZoneGuide.Shared.FriendlyName(code)}'"
+        + (za is { } z ? $"  act={z.Act} level={z.Level} waypoint={z.Waypoint} town={z.Town}" : "  (NOT in world_areas)"));
+
+    // Walk awake entities into category buckets.
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    reader.TryReadStruct<int>(ai + Poe2.AreaInstance.AwakeEntities + 8, out var size);
+    if (head == 0 || size <= 0) { Console.Error.WriteLine("no awake entities"); return 1; }
+
+    var monsters = new List<nint>(); var chests = new List<nint>(); var transitions = new List<nint>();
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    while (queue.Count > 0 && visited.Count < 200000)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        var ent = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (ent == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+        var meta = ReadEntityMetadata(reader, ent);
+        if (meta.Contains("/Monsters/", StringComparison.Ordinal)) { if (monsters.Count < perBucket) monsters.Add(ent); }
+        else if (meta.Contains("/Chests", StringComparison.Ordinal)) { if (chests.Count < perBucket) chests.Add(ent); }
+        else if (meta.Contains("Transition", StringComparison.Ordinal)) { if (transitions.Count < perBucket) transitions.Add(ent); }
+    }
+
+    // (2) EntityNameResolver sample across all buckets.
+    Console.WriteLine("\n=== EntityNameResolver (metadata → friendly) ===");
+    foreach (var ent in monsters.Concat(chests).Concat(transitions).Take(12))
+    {
+        var meta = ReadEntityMetadata(reader, ent);
+        Console.WriteLine($"  {EntityNameResolver.Shared.ResolveOrShorten(meta),-32} ← {meta}");
+    }
+
+    // Dump the full component-name list for one chest + one monster so the real component names
+    // backing the ✗ offsets are visible (guessed names below may need correcting).
+    if (chests.Count > 0) DumpComponentNames(reader, chests[0], "CHEST");
+    if (monsters.Count > 0) DumpComponentNames(reader, monsters[0], "MONSTER");
+
+    // (3a) Chest offsets — the magic unopened chest is ground truth (OpenState should be 1=closed).
+    Console.WriteLine("\n=== Chest offsets (OpenState ✓0x168 | ✗ Locked 0x25 / Large 0x21 / OpeningDestroys 0x20) ===");
+    foreach (var ent in chests)
+    {
+        var meta = ReadEntityMetadata(reader, ent);
+        var c = ResolveComponentAddr(reader, ent, "Chest");
+        var omp = ResolveComponentAddr(reader, ent, "ObjectMagicProperties");
+        var rarity = omp != 0 && reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var r) ? r : -1;
+        Console.WriteLine($"  {EntityNameResolver.Shared.ResolveOrShorten(meta)}  rarity={rarity}  chestComp=0x{c:X}");
+        if (c == 0) { Console.WriteLine("    (no Chest component)"); continue; }
+        Console.WriteLine($"    OpenState(+0x168)={B(reader, c + 0x168)}  Locked(+0x25)={B(reader, c + 0x25)}"
+            + $"  Large(+0x21)={B(reader, c + 0x21)}  OpeningDestroys(+0x20)={B(reader, c + 0x20)}");
+        DumpWindow(reader, c, 0x40, "    ");
+    }
+
+    // (3b) Monster offsets.
+    Console.WriteLine("\n=== Monster offsets (✗ IsBoss 0x27 | Targetable IsTargetable 0x18 / Attackable 0x17 | Pathfinding BaseSpeed 0xEC int / Flying 0xE5) ===");
+    foreach (var ent in monsters)
+    {
+        var meta = ReadEntityMetadata(reader, ent);
+        var mon = ResolveComponentAddr(reader, ent, "Monster");
+        var tgt = ResolveComponentAddr(reader, ent, "Targetable");
+        var pf  = ResolveComponentAddr(reader, ent, "Pathfinding");
+        var omp = ResolveComponentAddr(reader, ent, "ObjectMagicProperties");
+        var rarity = omp != 0 && reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var r) ? r : -1;
+        var rname = rarity switch { 0 => "Normal", 1 => "Magic", 2 => "Rare", 3 => "UNIQUE", _ => "?" };
+        Console.WriteLine($"  [{rname}] {EntityNameResolver.Shared.ResolveOrShorten(meta)}  ({meta})");
+        // For bosses/uniques, also dump the Monster component head so the real boss flag can be spotted
+        // if 0x27 isn't it.
+        if (mon != 0 && rarity == 3) DumpWindow(reader, mon, 0x40, "      mon ");
+        Console.WriteLine($"    Monster=0x{mon:X} IsBoss(+0x27)={B(reader, mon + 0x27)}   "
+            + $"Targetable=0x{tgt:X} IsTargetable(+0x18)={B(reader, tgt + 0x18)} Attackable(+0x17)={B(reader, tgt + 0x17)}");
+        Console.WriteLine($"    Pathfinding=0x{pf:X} BaseSpeed(+0xEC)={I(reader, pf + 0xEC)} Flying(+0xE5)={B(reader, pf + 0xE5)}");
+    }
+
+    // (3c) Area transitions.
+    if (transitions.Count > 0)
+    {
+        Console.WriteLine("\n=== AreaTransition offsets (✗ GracePeriod 0x18 float / TeleportDelay 0x1C float) ===");
+        foreach (var ent in transitions)
+        {
+            var meta = ReadEntityMetadata(reader, ent);
+            var at = ResolveComponentAddr(reader, ent, "AreaTransition");
+            Console.WriteLine($"  {EntityNameResolver.Shared.ResolveOrShorten(meta)}  AreaTransition=0x{at:X}"
+                + (at != 0 ? $"  GracePeriod(+0x18)={F(reader, at + 0x18)} TeleportDelay(+0x1C)={F(reader, at + 0x1C)}" : ""));
+        }
+    }
+    return 0;
+}
+
+static void DumpComponentNames(MemoryReader reader, nint entity, string label)
+{
+    Console.WriteLine($"\n=== {label} component names @ 0x{entity:X} ({ReadEntityMetadata(reader, entity)}) ===");
+    var details = SafePtr(reader, entity + Poe2.Entity.EntityDetailsPtr);
+    var lookup = details == 0 ? 0 : SafePtr(reader, details + Poe2.EntityDetails.ComponentLookUpPtr);
+    if (lookup == 0) { Console.WriteLine("  (no component lookup)"); return; }
+    if (!reader.TryReadStruct<POE2Radar.Core.Game.StdVector>(entity + Poe2.Entity.ComponentList, out var cl)) return;
+    var bFirst = SafePtr(reader, lookup + Poe2.ComponentLookUp.NameAndIndexBucket);
+    if (!reader.TryReadStruct<nint>(lookup + Poe2.ComponentLookUp.NameAndIndexBucket + 8, out var bLast)) return;
+    var entries = ((long)bLast - (long)bFirst) / Poe2.ComponentLookUp.EntryStride;
+    if (bFirst == 0 || entries is <= 0 or > 256) { Console.WriteLine("  (implausible entry count)"); return; }
+    var names = new List<string>();
+    for (long i = 0; i < entries; i++)
+    {
+        var e = bFirst + (nint)(i * Poe2.ComponentLookUp.EntryStride);
+        var nm = reader.ReadStringUtf8(SafePtr(reader, e), 40);
+        if (!string.IsNullOrEmpty(nm)) names.Add(nm);
+    }
+    Console.WriteLine("  " + string.Join(", ", names.OrderBy(x => x, StringComparer.Ordinal)));
+}
+
+static void DumpWindow(MemoryReader reader, nint addr, int len, string indent)
+{
+    var buf = new byte[len];
+    if (reader.TryReadBytes(addr, buf) != len) { Console.WriteLine($"{indent}(read failed)"); return; }
+    for (var i = 0; i < len; i += 16)
+        Console.WriteLine($"{indent}+0x{i:X2}  {string.Join(' ', Enumerable.Range(0, 16).Select(j => buf[i + j].ToString("X2")))}");
+}
+
+static int B(MemoryReader reader, nint addr) => reader.TryReadStruct<byte>(addr, out var b) ? b : -1;
+static int I(MemoryReader reader, nint addr) => reader.TryReadStruct<int>(addr, out var v) ? v : -1;
+static float F(MemoryReader reader, nint addr) => reader.TryReadStruct<float>(addr, out var v) ? v : float.NaN;
 
 // Resolve a component address by name (same StdBucket walk as Poe2Live, inline for probes).
 static nint ResolveComponentAddr(MemoryReader reader, nint entity, string name)

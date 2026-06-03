@@ -296,6 +296,12 @@ public sealed class OverlayRenderer : IDisposable
 
     private static DrawStyle ToDrawStyle(IconStyle s) => new(s.Shape, s.Size, ParseColor(s.Color, s.Opacity));
 
+    /// <summary>The basic "could be drawn at all" gate, independent of styling: not a corpse, and not
+    /// an already-opened chest. Shared by <see cref="ResolveStyle"/> and the watched-highlight path.</summary>
+    private static bool IsDrawable(Poe2Live.EntityDot e)
+        => !(e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive)
+           && !(e.Category == Poe2Live.EntityCategory.Chest && e.Opened);
+
     /// <summary>Clamp a 0..1 channel to a 0..255 byte (rounded).</summary>
     private static byte ToByte(float f) => (byte)Math.Clamp((int)MathF.Round(f * 255f), 0, 255);
 
@@ -308,8 +314,7 @@ public sealed class OverlayRenderer : IDisposable
     private static DrawStyle? ResolveStyle(RenderContext ctx, Poe2Live.EntityDot e)
     {
         // Never draw corpses or already-opened chests, even if a mechanic would otherwise match.
-        if (e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive) return null;
-        if (e.Category == Poe2Live.EntityCategory.Chest && e.Opened) return null;
+        if (!IsDrawable(e)) return null;
 
         var st = ctx.Styles;
 
@@ -398,10 +403,20 @@ public sealed class OverlayRenderer : IDisposable
         foreach (var e in ctx.Entities)
         {
             if (ctx.HideJunk && JunkFilter.IsJunk(e.Metadata)) continue;
-            if (ResolveStyle(ctx, e) is not { } ds) continue; // null = filtered out
+
+            // A user "watched" rule force-draws the entity in its own color/shape/size and labels it —
+            // overriding the default category style, but still suppressing corpses / opened chests.
+            var watch = IsDrawable(e) ? ctx.WatchedMatch?.Invoke(e.Metadata) : null;
+            var ds = watch is { } w
+                ? new DrawStyle(w.Shape, w.Size, ParseColor(w.Color, 1f))
+                : ResolveStyle(ctx, e);
+            if (ds is not { } style) continue; // null = filtered out
+
             var p = Project(new NumVec2(e.Grid.X, e.Grid.Y), player, center, scale);
-            _bStyle!.Color = ds.Color;
-            DrawIcon(rt, ds.Shape, p, ds.Size, _bStyle, filled: true);
+            _bStyle!.Color = style.Color;
+            DrawIcon(rt, style.Shape, p, style.Size, _bStyle, filled: true);
+            if (watch is { Label.Length: > 0 } wl)
+                rt.DrawText(wl.Label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bStyle, DrawTextOptions.Clip);
         }
 
         // Static tile landmarks (boss arena, treasure, …) — configured marker + label at the centroid.
@@ -426,8 +441,9 @@ public sealed class OverlayRenderer : IDisposable
         // intent to navigate); not gated on ShowPath.
         DrawPaths(rt, ctx, player, center, scale);
 
-        // Player blip on top.
-        rt.FillEllipse(new Ellipse(center, 5f, 5f), _bPlayer!);
+        // Player blip on top (toggleable — some prefer no self-marker).
+        if (ctx.ShowPlayerBlip)
+            rt.FillEllipse(new Ellipse(center, 5f, 5f), _bPlayer!);
     }
 
     /// <summary>

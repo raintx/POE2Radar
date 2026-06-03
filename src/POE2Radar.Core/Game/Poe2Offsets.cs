@@ -8,7 +8,10 @@ namespace POE2Radar.Core.Game;
 /// overlay still references and which is being migrated). As each PoE2 structure is validated
 /// here, the corresponding overlay reader is rechained to use it.</para>
 ///
-/// Markers: ✓ = confirmed against live PoE2; (GH2) = from GameHelper2, not yet live-checked.
+/// Markers: ✓ = confirmed against live PoE2; (GH2) = from GameHelper2, not yet live-checked;
+/// ✗ = transcribed from a third-party IDA dump (a private fork), NOT yet validated against our
+/// live client and NOT yet wired into any read path. Validate via the Research probes before using
+/// any ✗ offset — patch drift means these may be wrong for the current build.
 /// </summary>
 public static class Poe2
 {
@@ -159,10 +162,53 @@ public static class Poe2
         public const int Rarity = 0x144;
     }
 
-    /// <summary>Chest component. ✓ validated live (opened chest = 0, closed = 1 at +0x168).</summary>
+    /// <summary>Chest component. ✓ OpenState validated live (closed/unopened = 1, opened/used = 0 at
+    /// +0x168 — re-confirmed 2026-06-03 against a magic unopened chest). The fork's extra sub-offsets
+    /// did NOT survive validation on our build.</summary>
     public static class ChestComponent
     {
-        public const int OpenState = 0x168; // 1 = closed/openable, 0 = opened/used
+        public const int OpenState       = 0x168; // ✓ 1 = closed/openable, 0 = opened/used
+        // ⚠ INVALID on our build (live 2026-06-03, G3_3): 0x20/0x21/0x25 read 184/7/127 — identical
+        // across a magic AND a normal chest, sitting inside pointer bytes (component header). The
+        // fork's IDA offsets drifted; the real Locked/Large flags need rediscovery (--validate).
+        public const int OpeningDestroys = 0x20;  // ⚠ INVALID — pointer-field garbage; do not use
+        public const int Large           = 0x21;  // ⚠ INVALID — pointer-field garbage; do not use
+        public const int Locked          = 0x25;  // ⚠ INVALID — pointer-field garbage; do not use
+    }
+
+    /// <summary>Monster component (name confirmed live: "Monster"). ⚠ The fork's IsBoss did NOT
+    /// validate: a Unique boss ("Mighty Silverfist", QuadrillaBoss) still read 0 at +0x27 because the
+    /// byte is the high byte of a pointer at +0x20 (2026-06-03). Use Rarity == Unique (✓ validated) to
+    /// flag bosses/uniques instead — IsBoss here is both wrong and redundant.</summary>
+    public static class MonsterComponent
+    {
+        public const int IsBoss = 0x27; // ⚠ INVALID — pointer high-byte, 0 even for a Unique boss; use Rarity
+    }
+
+    /// <summary>Targetable component (name confirmed live: "Targetable"). ⚠ The fork's field offsets
+    /// did NOT validate: +0x18 read a constant 144 (0x90) across every monster (2026-06-03), so it is
+    /// NOT the IsTargetable bool. Offsets need rediscovery.</summary>
+    public static class Targetable
+    {
+        public const int Attackable   = 0x17; // ⚠ unconfirmed (read 0); likely wrong
+        public const int IsTargetable = 0x18; // ⚠ INVALID — read constant 144, not a bool; rediscover
+    }
+
+    /// <summary>Pathfinding component (name confirmed live: "Pathfinding"). BaseSpeed PLAUSIBLE —
+    /// read varying values ~1183–1338 across monsters (2026-06-03), looks like a real per-monster int,
+    /// but the "speed / 0 ⇒ immobile" semantics are unconfirmed. Flying suspect (read 4/5, not a bool).</summary>
+    public static class PathfindingComponent
+    {
+        public const int BaseSpeed = 0xEC; // ✗ int — plausible (varies per monster); semantics unconfirmed
+        public const int Flying    = 0xE5; // ⚠ suspect — read 4/5, not a clean bool
+    }
+
+    /// <summary>AreaTransition component. ✗ IDA-sourced, NOT yet validated (no transitions in the
+    /// validation sample). Validate via <c>--validate</c> near a zone exit before use.</summary>
+    public static class AreaTransitionComponent
+    {
+        public const int GracePeriod   = 0x18; // ✗ float — unvalidated
+        public const int TeleportDelay = 0x1C; // ✗ float — unvalidated
     }
 
     /// <summary>Positioned component.</summary>

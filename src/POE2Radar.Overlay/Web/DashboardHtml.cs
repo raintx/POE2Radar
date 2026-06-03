@@ -4,8 +4,9 @@ namespace POE2Radar.Overlay.Web;
 /// Self-contained web dashboard served at <c>GET /</c> by <see cref="ApiServer"/>. One inlined
 /// HTML/CSS/JS document — no external assets beyond Google Fonts. The Console tab reads/writes
 /// radar/visual settings via <c>/api/settings</c> (the only writes it makes — flags + calibration,
-/// never flask/automation); the Entities and Landmarks tabs poll the same-origin read endpoints
-/// (<c>/state</c>, <c>/entities</c>, <c>/landmarks</c>).
+/// never flask/automation); the Filters tab manages watched/hidden lists via <c>/api/watched</c> /
+/// <c>/api/hidden</c>; the Dashboard tab polls the same-origin read endpoints (<c>/state</c>,
+/// <c>/entities</c>, <c>/landmarks</c>, <c>/api/nav</c>).
 /// </summary>
 internal static class DashboardHtml
 {
@@ -106,6 +107,10 @@ internal static class DashboardHtml
   .tally .t{border:1px solid var(--line-soft); background:var(--panel); padding:9px 10px; border-radius:2px}
   .tally .t .n{font-size:20px; font-weight:600; color:var(--gold-bright); font-family:"Cinzel","Georgia",serif; line-height:1}
   .tally .t .l{font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); margin-top:4px}
+
+  /* ── zone leveling notes ── */
+  .znotes{margin-top:12px; padding:11px 13px; border:1px solid var(--line-soft); border-left:2px solid var(--gold-deep); border-radius:2px; background:var(--panel); white-space:pre-wrap; font-size:11px; line-height:1.5; color:var(--ink-dim); max-height:240px; overflow:auto}
+  .znotes .zt{font-family:"Cinzel","Georgia",serif; font-size:11px; letter-spacing:.1em; color:var(--gold-bright); margin-bottom:6px; white-space:normal}
 
   /* ── tabs ── */
   .tabs{display:flex; gap:2px; padding:14px 26px 0; border-bottom:1px solid var(--line)}
@@ -279,10 +284,12 @@ internal static class DashboardHtml
       </div>
 
       <div class="sect">Zone</div>
+      <div class="kv"><span>Area</span><span id="kAreaName">—</span></div>
       <div class="kv"><span>Area code</span><span id="kArea">—</span></div>
-      <div class="kv"><span>Area level</span><span id="kAlvl">—</span></div>
+      <div class="kv"><span>Act / Level</span><span id="kAlvl">—</span></div>
       <div class="kv"><span>Map open</span><span id="kMap">—</span></div>
       <div class="kv"><span>Auto-flask</span><span id="kFlask">—</span></div>
+      <div id="zoneNotes" class="znotes" hidden></div>
 
       <div class="sect">Census</div>
       <div class="tally">
@@ -297,6 +304,7 @@ internal static class DashboardHtml
     <main>
       <div class="tabs">
         <button class="tab on" data-tab="dashboard">Dashboard</button>
+        <button class="tab" data-tab="filters">Filters</button>
         <button class="tab" data-tab="settings">Settings</button>
       </div>
 
@@ -316,6 +324,58 @@ internal static class DashboardHtml
         <div class="empty" id="navEmpty" hidden>Nothing to navigate to here.</div>
       </section>
 
+      <section class="view" data-view="filters" hidden>
+        <div class="panel-grid">
+          <div class="card" style="grid-column:1/-1">
+            <h3>Watched <span class="tag">&middot; highlight + label by metadata</span></h3>
+            <div class="row"><div class="rl hint-row">Entities whose metadata contains a pattern are force-drawn in this color/shape/size with the label shown next to them &mdash; even if their category is normally filtered. First enabled match wins.</div></div>
+            <div id="watchList"></div>
+            <div class="mechrow">
+              <div class="top">
+                <input class="mname" id="watchPattern" placeholder="metadata pattern (e.g. Strongbox)">
+                <input class="mname" id="watchLabel" placeholder="label (e.g. Strongbox)">
+                <button class="addbtn" id="watchAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+              </div>
+            </div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3>Hidden <span class="tag">&middot; cull from radar, list &amp; nav</span></h3>
+            <div class="row"><div class="rl hint-row">Entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed everywhere &mdash; overlay, entity list, and navigation.</div></div>
+            <div id="hideList" class="controls" style="margin:8px 0 14px"></div>
+            <div class="controls" style="margin:0">
+              <input type="search" id="hidePattern" placeholder="pattern or glob to hide (e.g. AbyssCrack, *Daemon*)">
+              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px">+ Hide</button>
+            </div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3>Auto-path patterns <span class="tag">&middot; auto-select nav targets on zone entry</span></h3>
+            <div class="row"><div class="rl hint-row">On entering a zone, every navigation target whose tile path / entity metadata contains one of these is auto-selected for path drawing (up to 8). Clear all to disable.</div></div>
+            <div id="autoNavList" class="controls" style="margin:8px 0 12px"></div>
+            <div class="controls" style="margin:0 0 12px">
+              <input type="search" id="autoNavPattern" placeholder="pattern (e.g. Waypoint)">
+              <button class="addbtn" id="autoNavAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+            </div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px">Suggestions &mdash; click to add:</div></div>
+            <div class="controls" id="autoNavSuggest" style="margin:0"></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3>Landmark tiles <span class="tag">&middot; surface terrain tiles as map markers (shown anywhere)</span></h3>
+            <div class="row"><div class="rl hint-row">Terrain tiles whose path contains a pattern are surfaced as landmarks &mdash; visible regardless of where you are on the map (unlike entities, which only show in range). Optional label renames them; blank uses the tile's own name. Built-in features (bosses, waypoints, league mechanics) already show &mdash; add your own here.</div></div>
+            <div id="lmpatList"></div>
+            <div class="mechrow">
+              <div class="top">
+                <input class="mname" id="lmpatPattern" placeholder="tile-path pattern (e.g. Vendor, Sanctum, Waygate)">
+                <input class="mname" id="lmpatLabel" placeholder="label (optional)">
+                <button class="addbtn" id="lmpatAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+              </div>
+            </div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px">Suggestions &mdash; click to add:</div></div>
+            <div class="controls" id="lmpatSuggest" style="margin:0"></div>
+          </div>
+        </div>
+        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsgF">&#10003; saved to config</span></div>
+      </section>
+
       <section class="view" data-view="settings" hidden>
         <div class="panel-grid">
           <div class="card">
@@ -324,6 +384,8 @@ internal static class DashboardHtml
               <label class="sw"><input type="checkbox" data-set="showMonsters"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Show terrain<small>walkable-terrain bitmap</small></div>
               <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Show player blip<small>blue dot marking your own position</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPlayerBlip"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Hide junk entities<small>suppress cosmetic / FX / daemon dots</small></div>
               <label class="sw"><input type="checkbox" data-set="hideJunk"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Navigation paths<small>draw A&#42; routes to selected landmarks</small></div>
@@ -427,7 +489,7 @@ const $$ = s => [...document.querySelectorAll(s)];
 // Path palette — must match OverlayRenderer.PathPalette (route color by selection slot).
 const PALETTE = ['#33E666','#FF8C1A','#4DB3FF','#FF4DB3','#F2E633','#9966FF','#33FFD9','#FF6666'];
 
-let state=null, entities=[], landmarks=[], selected=new Map(); // id -> color slot
+let state=null, zone=null, entities=[], landmarks=[], selected=new Map(); // id -> color slot
 let activeTab='dashboard', kindFilter='all', aliveOnly=true, search='';
 
 /* ── tabs ── */
@@ -436,6 +498,7 @@ $$('.tab').forEach(t=>t.onclick=()=>{
   $$('.tab').forEach(x=>x.classList.toggle('on',x===t));
   $$('.view').forEach(v=>v.hidden = v.dataset.view!==activeTab);
   if(activeTab==='settings') loadSettings();
+  if(activeTab==='filters') loadFilters();
   pump();
 });
 
@@ -447,6 +510,7 @@ async function tick(){
   try{
     state = await getJSON('/state');
     setConn(true);
+    try{ zone = await getJSON('/api/zone'); }catch(e){ zone=null; }
     renderState();
     if(activeTab==='dashboard'){
       [entities, landmarks] = await Promise.all([getJSON('/entities?limit=2000'), getJSON('/landmarks')]);
@@ -483,7 +547,7 @@ function navRows(){
   for(const e of entities){
     if(aliveOnly && !e.alive) continue;
     const tag = e.poi ? 'POI' : (e.rarity && e.rarity!=='NonMonster' ? e.rarity : e.category);
-    rows.push({id:'e:'+e.id, name:prettify(e.metadata), kind:e.category, tag, dist:e.dist, key:e.metadata||''});
+    rows.push({id:'e:'+e.id, name:e.name||prettify(e.metadata), kind:e.category, tag, dist:e.dist, key:e.metadata||''});
   }
   return rows;
 }
@@ -711,14 +775,137 @@ function renderMechanics(){
 }
 $('#mechAdd').onclick=()=>{ if(!styles) return; styles.mechanics=styles.mechanics||[]; styles.mechanics.push({enabled:true,name:'New',match:[],shape:'Star',color:'#ffd926',opacity:1,size:6}); renderMechanics(); saveStyles(); };
 
+/* ── Filters tab: Watched highlight rules + Hidden cull patterns + Auto-path patterns ── */
+let watched=[], hidden=[], autoNav=[], lmpat=[];
+const AUTONAV_SUGGEST=['AreaTransition','Waypoint','Checkpoint','QuestChest','QuestObject','Shrine','Strongbox','ExpeditionEncounter','Ritual','Breach'];
+const LMPAT_SUGGEST=['Vendor','Sanctum','Trial','Vaal','Waygate','Arena','Strongbox'];
+function flashF(){ const m=$('#savedMsgF'); if(!m) return; m.classList.add('show'); clearTimeout(m._t); m._t=setTimeout(()=>m.classList.remove('show'),1100); }
+async function postWatched(body){ try{ await fetch('/api/watched',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); flashF(); }catch(e){} }
+async function postHidden(body){ try{ await fetch('/api/hidden',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); flashF(); }catch(e){} }
+async function loadFilters(){
+  try{ const w=await getJSON('/api/watched'); watched=w.rules||[]; }catch(e){ watched=[]; }
+  try{ const h=await getJSON('/api/hidden'); hidden=h.patterns||[]; }catch(e){ hidden=[]; }
+  try{ const s=await getJSON('/api/settings'); autoNav=s.autoNavPatterns||[]; }catch(e){ autoNav=[]; }
+  try{ const l=await getJSON('/api/landmark-patterns'); lmpat=l.patterns||[]; }catch(e){ lmpat=[]; }
+  renderWatched(); renderHidden(); renderAutoNav(); renderLmpat();
+}
+function watchRow(w){
+  return `<div class="mechrow" data-p="${esc(w.pattern)}">
+    <div class="top">
+      <label class="sw"><input type="checkbox" class="w-en"${w.enabled?' checked':''}><span class="track"></span><span class="knob"></span></label>
+      <input class="mname w-label" value="${esc(w.label)}" placeholder="label">
+      <button class="delbtn w-del">Remove</button>
+    </div>
+    <div class="matchin" style="border:none;padding:0 0 6px;color:var(--ink-faint)">matches: <code>${esc(w.pattern)}</code></div>
+    <div class="ctl">
+      ${pickerHtml(w.shape,w.color)}
+      <input type="color" class="w-color" value="${w.color||'#ffffff'}">
+      <input type="number" class="numin sz w-size" step="0.1" min="0.5" value="${w.size}">
+    </div>
+  </div>`;
+}
+function renderWatched(){
+  $('#watchList').innerHTML = watched.map(watchRow).join('') || '<div class="row"><div class="rl hint-row">No watch rules yet.</div></div>';
+  $$('#watchList .mechrow').forEach(row=>{
+    const p=row.dataset.p, w=watched.find(x=>x.pattern===p); if(!w) return;
+    const pk=row.querySelector('.iconpick');
+    row.querySelector('.w-en').onchange=e=>{ w.enabled=e.target.checked; postWatched({update:{pattern:p,enabled:w.enabled}}); };
+    row.querySelector('.w-label').onchange=e=>{ w.label=e.target.value; postWatched({update:{pattern:p,label:w.label}}); };
+    pk.onclick=()=>openIconPicker(pk,w.shape,n=>{ w.shape=n; refreshPicker(pk,n,w.color); postWatched({update:{pattern:p,shape:n}}); });
+    row.querySelector('.w-color').onchange=e=>{ w.color=e.target.value; refreshPicker(pk,w.shape,w.color); postWatched({update:{pattern:p,color:w.color}}); };
+    row.querySelector('.w-size').onchange=e=>{ const v=parseFloat(e.target.value); if(!isNaN(v)){ w.size=v; postWatched({update:{pattern:p,size:v}}); } };
+    row.querySelector('.w-del').onclick=()=>{ postWatched({remove:p}).then(loadFilters); };
+  });
+}
+$('#watchAdd').onclick=()=>{
+  const pattern=$('#watchPattern').value.trim(); if(!pattern) return;
+  const label=$('#watchLabel').value.trim()||pattern;
+  $('#watchPattern').value=''; $('#watchLabel').value='';
+  postWatched({add:{pattern,label,color:'#ffd926',shape:'Diamond',size:7}}).then(loadFilters);
+};
+function renderHidden(){
+  $('#hideList').innerHTML = hidden.length ? hidden.map(p=>
+    `<span class="chip on" data-p="${esc(p)}">${esc(p)} <b style="margin-left:5px;cursor:pointer">&#10005;</b></span>`).join('')
+    : '<span style="color:var(--ink-faint);font-size:11px;font-style:italic">Nothing hidden.</span>';
+  $$('#hideList .chip').forEach(c=>c.querySelector('b').onclick=()=>{ postHidden({remove:c.dataset.p}).then(loadFilters); });
+}
+$('#hideAdd').onclick=()=>{
+  const p=$('#hidePattern').value.trim(); if(!p) return;
+  $('#hidePattern').value='';
+  postHidden({add:p}).then(loadFilters);
+};
+$('#hidePattern').onkeydown=e=>{ if(e.key==='Enter') $('#hideAdd').click(); };
+
+async function saveAutoNav(){ try{ await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoNavPatterns:autoNav})}); flashF(); }catch(e){} }
+function renderAutoNav(){
+  $('#autoNavList').innerHTML = autoNav.length ? autoNav.map(p=>
+    `<span class="chip on" data-p="${esc(p)}">${esc(p)} <b style="margin-left:5px;cursor:pointer">&#10005;</b></span>`).join('')
+    : '<span style="color:var(--ink-faint);font-size:11px;font-style:italic">Auto-path disabled (no patterns).</span>';
+  $$('#autoNavList .chip').forEach(c=>c.querySelector('b').onclick=()=>{ autoNav=autoNav.filter(x=>x!==c.dataset.p); renderAutoNav(); saveAutoNav(); });
+  $('#autoNavSuggest').innerHTML = AUTONAV_SUGGEST.map(p=>{
+    const on=autoNav.some(x=>x.toLowerCase()===p.toLowerCase());
+    return `<span class="chip${on?' on':''}" data-s="${esc(p)}">${esc(p)}</span>`;
+  }).join('');
+  $$('#autoNavSuggest .chip').forEach(c=>c.onclick=()=>{
+    const p=c.dataset.s; if(autoNav.some(x=>x.toLowerCase()===p.toLowerCase())) return;
+    autoNav.push(p); renderAutoNav(); saveAutoNav();
+  });
+}
+$('#autoNavAdd').onclick=()=>{
+  const p=$('#autoNavPattern').value.trim(); if(!p) return;
+  if(!autoNav.some(x=>x.toLowerCase()===p.toLowerCase())) autoNav.push(p);
+  $('#autoNavPattern').value=''; renderAutoNav(); saveAutoNav();
+};
+$('#autoNavPattern').onkeydown=e=>{ if(e.key==='Enter') $('#autoNavAdd').click(); };
+
+/* ── landmark tile patterns (user-surfaced terrain landmarks) ── */
+async function postLmpat(body){ try{ await fetch('/api/landmark-patterns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); flashF(); }catch(e){} }
+function lmpatRow(p){
+  return `<div class="mechrow" data-p="${esc(p.pattern)}">
+    <div class="top">
+      <label class="sw"><input type="checkbox" class="lp-en"${p.enabled?' checked':''}><span class="track"></span><span class="knob"></span></label>
+      <input class="mname lp-label" value="${esc(p.label)}" placeholder="label (optional)">
+      <button class="delbtn lp-del">Remove</button>
+    </div>
+    <div class="matchin" style="border:none;padding:0;color:var(--ink-faint)">matches tile path: <code>${esc(p.pattern)}</code></div>
+  </div>`;
+}
+function renderLmpat(){
+  $('#lmpatList').innerHTML = lmpat.map(lmpatRow).join('') || '<div class="row"><div class="rl hint-row">No custom landmark patterns. Built-in features still show.</div></div>';
+  $$('#lmpatList .mechrow').forEach(row=>{
+    const p=row.dataset.p, e=lmpat.find(x=>x.pattern===p); if(!e) return;
+    row.querySelector('.lp-en').onchange=ev=>{ e.enabled=ev.target.checked; postLmpat({update:{pattern:p,enabled:e.enabled}}); };
+    row.querySelector('.lp-label').onchange=ev=>{ e.label=ev.target.value; postLmpat({update:{pattern:p,label:e.label}}); };
+    row.querySelector('.lp-del').onclick=()=>{ postLmpat({remove:p}).then(loadFilters); };
+  });
+  $('#lmpatSuggest').innerHTML = LMPAT_SUGGEST.map(s=>{
+    const on=lmpat.some(x=>x.pattern.toLowerCase()===s.toLowerCase());
+    return `<span class="chip${on?' on':''}" data-s="${esc(s)}">${esc(s)}</span>`;
+  }).join('');
+  $$('#lmpatSuggest .chip').forEach(c=>c.onclick=()=>{
+    const s=c.dataset.s; if(lmpat.some(x=>x.pattern.toLowerCase()===s.toLowerCase())) return;
+    postLmpat({add:{pattern:s}}).then(loadFilters);
+  });
+}
+$('#lmpatAdd').onclick=()=>{
+  const p=$('#lmpatPattern').value.trim(); if(!p) return;
+  const l=$('#lmpatLabel').value.trim();
+  $('#lmpatPattern').value=''; $('#lmpatLabel').value='';
+  postLmpat({add:{pattern:p,label:l}}).then(loadFilters);
+};
+$('#lmpatPattern').onkeydown=e=>{ if(e.key==='Enter') $('#lmpatAdd').click(); };
+
 /* ── left rail ── */
 function renderState(){
   const s=state; if(!s) return;
   const hp=Math.max(0,Math.min(100,s.hpPct||0)), mp=Math.max(0,Math.min(100,s.manaPct||0));
   $('#hpBar').style.width=hp+'%'; $('#mpBar').style.width=mp+'%';
   $('#hpNum').textContent=hp.toFixed(0)+'%'; $('#mpNum').textContent=mp.toFixed(0)+'%';
+  const areaName=(s.areaName&&s.areaName!==s.areaCode)?s.areaName:'';
+  $('#kAreaName').textContent=areaName||s.areaCode||'—';
   $('#kArea').textContent=s.areaCode||'—';
-  $('#kAlvl').textContent=s.areaLevel||'—';
+  const act=s.areaAct||0;
+  $('#kAlvl').textContent=(act?'Act '+act+' · ':'')+(s.areaLevel?('lvl '+s.areaLevel):'—');
   $('#kMap').textContent=s.mapVisible?'yes':'no';
   $('#kFlask').textContent=(s.autoFlask?'on':'off')+(s.flask?' · '+s.flask:'');
   const fs=$('#flaskState'); if(fs) fs.textContent=(s.autoFlask?'ON':'OFF')+(s.flask?' · '+s.flask:'');
@@ -726,7 +913,14 @@ function renderState(){
   $('#cPoi').textContent=s.poiCount||0;
   $('#cMon').textContent=(s.counts&&s.counts.Monster)||0;
   $('#cLm').textContent=s.landmarkCount||0;
-  $('#areaChip').innerHTML = (s.areaCode? s.areaCode : '—') + ' <b>·</b> ' + (s.inGame?'in game':'town/menu');
+  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>·</b> ' + (s.inGame?'in game':'town/menu');
+
+  // Zone leveling notes (from /api/zone): title + note text, hidden when there's nothing to show.
+  const zn=$('#zoneNotes');
+  if(zone && (zone.notes||'').trim()){
+    zn.hidden=false;
+    zn.innerHTML='<div class="zt">'+esc(zone.title||zone.name||'')+'</div>'+esc(zone.notes);
+  } else { zn.hidden=true; }
 }
 
 wireSettings(); wireHpBars(); wireTerrain(); loadIcons().then(loadSettings);
