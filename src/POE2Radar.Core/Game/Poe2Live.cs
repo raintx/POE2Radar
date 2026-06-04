@@ -23,8 +23,9 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, nint> _chestAddr = new();    // entity → Chest component (0 = none)
     private readonly Dictionary<nint, EntityCategory> _category = new();
     private readonly Dictionary<nint, string> _meta = new();
-    private readonly Dictionary<nint, bool> _hasIcon = new();      // entity has a MinimapIcon component (game POI)
+    private readonly Dictionary<nint, nint> _iconAddr = new();     // entity → MinimapIcon component (0 = none); game POI
     private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
+    private readonly Dictionary<nint, uint> _idAt = new();         // entity address → last-seen std::map key id (recycle guard)
     private nint _entCacheKey;   // AreaInstance address the entity caches were built for
 
     // Reused across Entities() calls (tick thread only) to avoid per-tick allocations. The std::map
@@ -49,7 +50,7 @@ public sealed class Poe2Live
 
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, Vector3 World, EntityCategory Category, string Metadata,
-        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened)
+        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false)
     {
         /// <summary>Monsters are "alive" only with positive HP; non-life entities are always shown.</summary>
         public bool IsAlive => HpMax <= 0 || HpCur > 0;
@@ -184,7 +185,7 @@ public sealed class Poe2Live
         if (areaInstance != _entCacheKey)
         {
             _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear(); _chestAddr.Clear();
-            _category.Clear(); _meta.Clear(); _hasIcon.Clear(); _rarity.Clear();
+            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _idAt.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -212,6 +213,16 @@ public sealed class Poe2Live
             _entQueue.Enqueue((nint)BitConverter.ToInt64(_nodeBuf, Poe2.StdMapNode.Right));
 
             if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+
+            // Recycle guard: entity object addresses are reused within an area as things die/spawn.
+            // The std::map key id is the stable per-entity identity (monotonic, never reused in an
+            // area), so if THIS address now carries a different id than we cached it under, the prior
+            // occupant is gone — evict its frozen component addresses/category/rarity/icon so we don't
+            // read a freed/reused Life or Render (stale HP bars over corpses, POIs flickering at stale
+            // positions). Re-resolves fresh below.
+            if (_idAt.TryGetValue(entity, out var prevId) && prevId != id) EvictEntity(entity);
+            _idAt[entity] = id;
+
             var world = EntityWorld(entity);
             if (world is not { } wv) continue;
             var g = new System.Numerics.Vector2(wv.X / Poe2.WorldToGridRatio, wv.Y / Poe2.WorldToGridRatio);
@@ -224,19 +235,41 @@ public sealed class Poe2Live
             if (cat is EntityCategory.Monster or EntityCategory.Chest) rarity = ReadRarity(entity);
             if (cat == EntityCategory.Chest) opened = ReadChestOpened(entity);
 
+            var (poi, iconComplete) = ReadIcon(entity);
             dots.Add(new EntityDot(id, entity, g, wv, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax,
-                HasIcon(entity), ReadReaction(entity), rarity, opened));
+                poi, ReadReaction(entity), rarity, opened, iconComplete));
         }
         return dots;
     }
 
-    /// <summary>Whether the entity has a MinimapIcon component — i.e. the game marks it as a POI.</summary>
-    private bool HasIcon(nint entity)
+    /// <summary>Drop every frozen per-entity cache entry for an address whose occupant has changed
+    /// (the std::map key id no longer matches). Forces a fresh component re-resolve next read.</summary>
+    private void EvictEntity(nint entity)
     {
-        if (_hasIcon.TryGetValue(entity, out var has)) return has;
-        has = ResolveComponent(entity, "MinimapIcon") != 0;
-        _hasIcon[entity] = has;
-        return has;
+        _renderAddr.Remove(entity); _lifeAddr.Remove(entity); _posAddr.Remove(entity);
+        _ompAddr.Remove(entity); _chestAddr.Remove(entity); _category.Remove(entity);
+        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity);
+    }
+
+    /// <summary>
+    /// The entity's POI state from its MinimapIcon component:
+    /// <list type="bullet">
+    /// <item><c>poi</c> — the game marks it as a map POI (component present).</item>
+    /// <item><c>complete</c> — the game has FADED the icon because its encounter is finished
+    ///   (CompletedState != 0). The component stays put once resolved, so we cache only its ADDRESS
+    ///   and read the flag live every tick (it flips, e.g. on claiming an expedition reward).</item>
+    /// </list>
+    /// </summary>
+    private (bool poi, bool complete) ReadIcon(nint entity)
+    {
+        if (!_iconAddr.TryGetValue(entity, out var icon))
+        {
+            icon = ResolveComponent(entity, "MinimapIcon");
+            _iconAddr[entity] = icon; // cache even if 0, to avoid re-walking non-POI entities
+        }
+        if (icon == 0) return (false, false);
+        var complete = _reader.TryReadStruct<int>(icon + Poe2.MinimapIcon.CompletedState, out var s) && s != 0;
+        return (true, complete);
     }
 
     private Rarity ReadRarity(nint entity)

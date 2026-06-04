@@ -296,11 +296,14 @@ public sealed class OverlayRenderer : IDisposable
 
     private static DrawStyle ToDrawStyle(IconStyle s) => new(s.Shape, s.Size, ParseColor(s.Color, s.Opacity));
 
-    /// <summary>The basic "could be drawn at all" gate, independent of styling: not a corpse, and not
-    /// an already-opened chest. Shared by <see cref="ResolveStyle"/> and the watched-highlight path.</summary>
+    /// <summary>The basic "could be drawn at all" gate, independent of styling: not a corpse, not an
+    /// already-opened chest, and not a completed encounter whose minimap icon the game has faded (e.g.
+    /// a looted Expedition marker). Shared by <see cref="ResolveStyle"/>, the mechanic-override path,
+    /// and the watched-highlight path — so a finished mechanic clears from ALL of them at once.</summary>
     private static bool IsDrawable(Poe2Live.EntityDot e)
         => !(e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive)
-           && !(e.Category == Poe2Live.EntityCategory.Chest && e.Opened);
+           && !(e.Category == Poe2Live.EntityCategory.Chest && e.Opened)
+           && !e.IconComplete;
 
     /// <summary>Clamp a 0..1 channel to a 0..255 byte (rounded).</summary>
     private static byte ToByte(float f) => (byte)Math.Clamp((int)MathF.Round(f * 255f), 0, 255);

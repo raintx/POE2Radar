@@ -155,6 +155,16 @@ public static class Poe2
         public const int Zoom = 0x528; // float, == 1.0 confirmed
     }
 
+    /// <summary>MinimapIcon component — present on entities the game marks as map POIs (waypoints,
+    /// checkpoints, league encounters…). <see cref="CompletedState"/> is an int the game flips when a
+    /// repeatable encounter is finished: it then FADES the icon rather than removing it. ✓ validated
+    /// live on an Expedition2Encounter — 0 while not-started/ready/active/looting, 1 after the reward
+    /// was claimed. Read it live (don't cache the value): the component stays put; only the flag flips.</summary>
+    public static class MinimapIcon
+    {
+        public const int CompletedState = 0x10; // ✓ int — 0 = active/shown, non-zero = completed/faded
+    }
+
     /// <summary>ObjectMagicProperties component — monster/chest rarity.</summary>
     public static class ObjectMagicProperties
     {

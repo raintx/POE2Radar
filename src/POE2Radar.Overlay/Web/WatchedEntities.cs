@@ -38,7 +38,25 @@ public sealed class WatchedEntities
         _filePath = filePath;
         Load();
         if (_entries.Count == 0) LoadDefaults();
+        if (Migrate()) Save();
         Rebuild();
+    }
+
+    /// <summary>One-time, idempotent repair of configs written by older builds (loaded verbatim).
+    /// The seeded watch pattern "Expedition2Encounter" is a substring of "Expedition2EncounterCrack",
+    /// so it force-drew the transient detonation-effect objects as expedition markers. Rewrite that
+    /// exact stale key to the precise "Expedition2/Expedition2Encounter" (which excludes the cracks),
+    /// preserving the user's label/color/shape. Only touches the exact known-bad key, so any pattern
+    /// the user themselves customized is left alone. Returns true if it changed anything.</summary>
+    private bool Migrate()
+    {
+        const string stale = "Expedition2Encounter";
+        const string precise = "Expedition2/Expedition2Encounter";
+        if (!_entries.TryGetValue(stale, out var old)) return false;
+        _entries.Remove(stale);
+        if (!_entries.ContainsKey(precise)) _entries[precise] = old with { Pattern = precise };
+        Console.WriteLine("Watched entities: migrated stale \"Expedition2Encounter\" pattern to the precise form.");
+        return true;
     }
 
     /// <summary>All rules (snapshot copy; safe to enumerate off-thread).</summary>

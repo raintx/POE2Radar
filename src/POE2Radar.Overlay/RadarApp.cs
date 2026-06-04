@@ -434,7 +434,7 @@ public sealed class RadarApp : IDisposable
 
         // (b) Entity POIs — id "e:<entityId>", nearest-first.
         var pois = _entities
-            .Where(e => e.IsAlive &&
+            .Where(e => e.IsAlive && !e.IconComplete &&
                         (e.Poi
                          || (e.Category == Poe2Live.EntityCategory.Monster && e.Rarity == Poe2Live.Rarity.Unique)
                          || MatchesAutoNav(e.Metadata)))

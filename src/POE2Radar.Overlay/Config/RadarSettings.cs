@@ -37,7 +37,10 @@ public sealed class RadarSettings
     //    MatchKey matches ANY pattern is auto-selected (up to the 8-color cap), so entering a new
     //    zone auto-draws a path to e.g. the expedition encounter. Seeded with one example so the
     //    feature is visible out of the box; clear the list to disable. ──
-    public List<string> AutoNavPatterns { get; set; } = new() { "ExpeditionEncounter" };
+    // Dir-qualified so it matches the real marker ("Expedition2/Expedition2Encounter") and not the
+    // transient ".../Objects/Expedition2EncounterCrack" effects. (Plain "ExpeditionEncounter" matched
+    // nothing — the live path is "Expedition2Encounter" with a digit.)
+    public List<string> AutoNavPatterns { get; set; } = new() { "Expedition2/Expedition2Encounter" };
 
     // ── Monster HP bars (world-space nameplates) by rarity.
     //    Defaults preserve prior behavior: Magic/Rare/Unique shown, Normal hidden. ──
@@ -102,14 +105,58 @@ public sealed class RadarSettings
             }
 
             var json = File.ReadAllText(FilePath);
-            var loaded = JsonSerializer.Deserialize<RadarSettings>(json, Json);
-            return loaded ?? new RadarSettings();
+            var loaded = JsonSerializer.Deserialize<RadarSettings>(json, Json) ?? new RadarSettings();
+            // Existing configs are loaded verbatim (never re-seeded from defaults), so repair stale
+            // patterns shipped by older builds in place, then persist the upgrade.
+            if (loaded.Migrate())
+            {
+                loaded.Save();
+                Console.WriteLine("Settings: migrated stale Expedition match patterns to the precise form.");
+            }
+            return loaded;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Settings load failed ({ex.Message}); using defaults.");
             return new RadarSettings();
         }
+    }
+
+    /// <summary>
+    /// One-time, idempotent repair of configs written by older builds (loaded verbatim, so they'd
+    /// otherwise keep the bug forever). Rewrites the over-broad Expedition matches — the bare
+    /// "Expedition" and the dead "ExpeditionEncounter" (real path is "Expedition2Encounter") that
+    /// tagged every "Expedition"-pathed entity (combat mobs + detonation cracks) — to the precise,
+    /// Other-gated "Expedition2/Expedition2Encounter". Returns true if anything changed.
+    /// </summary>
+    public bool Migrate()
+    {
+        const string precise = "Expedition2/Expedition2Encounter";
+        static bool IsStaleExp(string p) =>
+            string.Equals(p, "Expedition", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(p, "ExpeditionEncounter", StringComparison.OrdinalIgnoreCase);
+
+        var changed = false;
+
+        // Mechanic overrides: drop the stale keys; if any were present, ensure the precise key and
+        // an Other category gate (so it can't hijack the Monster-category expedition mobs).
+        if (Styles?.Mechanics is { } mechanics)
+            foreach (var m in mechanics)
+            {
+                if (m.Match is null || m.Match.RemoveAll(IsStaleExp) == 0) continue;
+                if (!m.Match.Exists(p => string.Equals(p, precise, StringComparison.OrdinalIgnoreCase)))
+                    m.Match.Add(precise);
+                m.Categories ??= new List<string>();
+                if (m.Categories.Count == 0) m.Categories.Add("Other");
+                changed = true;
+            }
+
+        // Auto-nav: the seeded "ExpeditionEncounter" matched nothing (digit in the real path).
+        if (AutoNavPatterns is not null)
+            for (var i = 0; i < AutoNavPatterns.Count; i++)
+                if (IsStaleExp(AutoNavPatterns[i])) { AutoNavPatterns[i] = precise; changed = true; }
+
+        return changed;
     }
 
     /// <summary>Persist current settings to disk. Never throws on IO error — logs and continues.</summary>
@@ -240,7 +287,14 @@ public sealed class RadarStyles
     // Metadata-matched overrides (first enabled match wins). Seeded with common PoE2 mechanics.
     public List<MechanicStyle> Mechanics { get; set; } = new()
     {
-        new() { Name = "Expedition", Match = new() { "ExpeditionEncounter", "Expedition" }, Shape = "Plus",     Color = "#26E6D9", Opacity = 1f, Size = 7f },
+        // Match the actual league POI marker ONLY. The old bare "Expedition" substring (with an empty
+        // category gate) hijacked EVERY entity carrying "Expedition" in its path — the combat mobs
+        // (".../...CrabExpedition", category Monster) and the transient detonation effects
+        // (".../Objects/Expedition2EncounterCrack", category Other) all got the marker icon. The
+        // dir-qualified key hits only "Expedition2/Expedition2Encounter" (NOT the "/Objects/...Crack"
+        // path), and the Other gate keeps it off the monsters. ("ExpeditionEncounter" was also dead —
+        // the real path is "Expedition2Encounter" with a digit, so that key matched nothing.)
+        new() { Name = "Expedition", Match = new() { "Expedition2/Expedition2Encounter" }, Categories = new() { "Other" }, Shape = "Plus", Color = "#26E6D9", Opacity = 1f, Size = 7f },
         new() { Name = "Ritual",     Match = new() { "Ritual" },                            Shape = "Star",     Color = "#FF3355", Opacity = 1f, Size = 7f },
         new() { Name = "Breach",     Match = new() { "Breach" },                            Shape = "Diamond",  Color = "#A64DFF", Opacity = 1f, Size = 7f },
         new() { Name = "Strongbox",  Match = new() { "Strongbox", "StrongBoxes" },          Shape = "Square",   Color = "#FFB300", Opacity = 1f, Size = 6f },

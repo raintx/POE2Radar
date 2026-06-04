@@ -39,6 +39,9 @@ if (HasFlag(args, "--find-terrain"))
 if (HasFlag(args, "--find-map"))
     return RunFindMap(process, reader);
 
+if (HasFlag(args, "--watch-expedition"))
+    return RunWatchExpedition(process, reader);
+
 if (HasFlag(args, "--watch"))
     return RunWatch(process, reader);
 
@@ -796,6 +799,74 @@ static int RunWatch(ProcessHandle process, MemoryReader reader)
                 }
         }
         Thread.Sleep(1500);
+    }
+}
+
+// ── Watch-expedition: poll the live entity list, re-resolving expedition-related entities each
+// tick (robust to address recycling), and log whenever the set OR any per-entity signal changes:
+//   poi  = MinimapIcon component present (what we draw as a map icon)
+//   sm   = StateMachine state int @ +0x10 (the candidate "event phase" field)
+//   hp   = Life current/max
+// Run it across an expedition (ready → place charges → detonate → loot → done) to see which signal
+// flips when the icon should hide, and which extra entities get tagged while it's active.
+static int RunWatchExpedition(ProcessHandle process, MemoryReader reader)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("Could not lock GameState slot (in game?)."); return 1; }
+    var live = new Poe2Live(reader, slot);
+    Console.WriteLine($"WATCH-EXPEDITION started (slot 0x{slot:X}). Logging on change. Ctrl+C to stop.");
+
+    var prev = new Dictionary<uint, string>();
+    while (true)
+    {
+        if (live.TryResolve(out _, out var ai, out _))
+        {
+            var cur = new Dictionary<uint, string>();
+            foreach (var (id, ent, meta) in WalkEntities(reader, ai))
+            {
+                if (!meta.Contains("xpedition", StringComparison.OrdinalIgnoreCase)) continue;
+                var sm = ResolveComponentAddr(reader, ent, "StateMachine");
+                var smState = sm != 0 && reader.TryReadStruct<int>(sm + 0x10, out var v) ? v.ToString() : "-";
+                var poi = ResolveComponentAddr(reader, ent, "MinimapIcon") != 0;
+                var life = ResolveComponentAddr(reader, ent, "Life");
+                var hp = life != 0 && reader.TryReadStruct<POE2Radar.Core.Game.VitalStruct>(life + 0x1A8, out var h) ? $"{h.Current}/{h.Max}" : "-";
+                cur[id] = $"poi={poi} sm={smState} hp={hp} {meta}";
+            }
+
+            // Log additions / removals / changed signals.
+            foreach (var (id, line) in cur)
+                if (!prev.TryGetValue(id, out var old) || old != line)
+                    Console.WriteLine($"[t={Environment.TickCount64}] id={id,-5} {line}");
+            foreach (var id in prev.Keys)
+                if (!cur.ContainsKey(id))
+                    Console.WriteLine($"[t={Environment.TickCount64}] id={id,-5} REMOVED ({prev[id]})");
+            prev = cur;
+        }
+        Thread.Sleep(750);
+    }
+}
+
+// Walk the AwakeEntities std::map, yielding (id, entityPtr, metadata) for real entities.
+static IEnumerable<(uint id, nint ent, string meta)> WalkEntities(MemoryReader reader, nint ai)
+{
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    if (head == 0) yield break;
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    while (queue.Count > 0 && visited.Count < 200000)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        var ent = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (ent == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+        yield return (id, ent, ReadEntityMetadata(reader, ent));
     }
 }
 
