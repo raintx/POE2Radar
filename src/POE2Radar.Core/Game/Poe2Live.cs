@@ -156,16 +156,61 @@ public sealed class Poe2Live
 
     private nint _plLife, _plLifeFor;
 
+    // Self-healing vital offsets. Components are resolved by NAME (robust across patches), but the
+    // VitalStruct offsets WITHIN the Life component slide between patches (e.g. 2026-06-04: Health
+    // 0x1A8→0x1B0). We validate the configured offset against a live Life component once; if it
+    // doesn't read a valid pool, we scan the component for its VitalStructs (ascending order =
+    // Health, Mana, ES) and use those for the session — so a minor layout shift degrades gracefully
+    // (auto-flask + HP bars keep working) instead of silently reading 0. The same offsets back the
+    // monster HP reads (identical component layout). Logged loudly so the table still gets updated.
+    private int _healthOff = Poe2.Life.Health, _manaOff = Poe2.Life.Mana;
+    private bool _vitalOffsetsResolved;
+
+    private void EnsureVitalOffsets(nint lifeComp)
+    {
+        if (_vitalOffsetsResolved || lifeComp == 0) return;
+        // Fast path: the configured Health offset already reads a valid pool — nothing to do (no scan).
+        if (_reader.TryReadStruct<VitalStruct>(lifeComp + Poe2.Life.Health, out var h) && h.LooksValid())
+        { _vitalOffsetsResolved = true; return; }
+
+        // Drifted (or not loaded yet): scan the component for valid VitalStructs. After a hit, jump
+        // past the struct's extent so the overlapping +4 false-positive isn't counted as a 2nd pool.
+        var found = new List<int>(4);
+        for (var off = 0x80; off <= 0x400 && found.Count < 4;)
+        {
+            if (_reader.TryReadStruct<VitalStruct>(lifeComp + off, out var v) && v.LooksValid())
+            { found.Add(off); off += 0x34; }
+            else off += 4;
+        }
+        if (found.Count == 0) return; // not in-game yet / unreadable — retry next call (don't latch)
+
+        _vitalOffsetsResolved = true;
+        // Relocate HEALTH ONLY. It's reliably the FIRST valid pool in the component, and it's the
+        // safety-critical flask. Mana is deliberately NOT auto-guessed: the component holds other
+        // valid-looking VitalStructs between Health and Mana (verified live — an ordinal "2nd pool =
+        // Mana" guess lands on the wrong one), and driving the mana flask off the wrong pool is worse
+        // than not firing it. If Mana's offset drifts it just reads 0 (→ mana% 100 → no misfire) until
+        // the table is updated. Health self-heals; mana degrades safely.
+        _healthOff = found[0];
+        if (_healthOff != Poe2.Life.Health)
+            Console.WriteLine($"Poe2Live: Life Health offset appears to have drifted — auto-relocated " +
+                $"0x{Poe2.Life.Health:X}->0x{_healthOff:X} (life flask + HP bars keep working). Update " +
+                $"Poe2.Life + re-validate (Research --hp); mana flask needs the offset table updated.");
+    }
+
     /// <summary>
     /// Local player HP/mana as current vs. *unreserved* max (auras reserve part of the pool, so
-    /// raw Max would understate the real % full). Drives the auto-flask thresholds.
+    /// raw Max would understate the real % full). Drives the auto-flask thresholds. Returns null
+    /// when the Life component / vitals can't be read plausibly (Max &lt;= 0) — the caller MUST treat
+    /// that as "unknown" and NOT fire flasks, rather than assuming full/empty.
     /// </summary>
     public Vitals? PlayerVitals(nint localPlayer)
     {
         if (localPlayer != _plLifeFor) { _plLifeFor = localPlayer; _plLife = ResolveComponent(localPlayer, "Life"); }
         if (_plLife == 0) return null;
-        if (!_reader.TryReadStruct<VitalStruct>(_plLife + Poe2.Life.Health, out var hp)) return null;
-        _reader.TryReadStruct<VitalStruct>(_plLife + Poe2.Life.Mana, out var mana);
+        EnsureVitalOffsets(_plLife);
+        if (!_reader.TryReadStruct<VitalStruct>(_plLife + _healthOff, out var hp) || hp.Max <= 0) return null;
+        _reader.TryReadStruct<VitalStruct>(_plLife + _manaOff, out var mana);
         return new Vitals(hp.Current, Unreserved(hp), mana.Current, Unreserved(mana));
     }
 
@@ -308,7 +353,9 @@ public sealed class Poe2Live
             _lifeAddr[entity] = life;
         }
         if (life == 0) return (0, 0);
-        if (!_reader.TryReadStruct<VitalStruct>(life + Poe2.Life.Health, out var v)) return (0, 0);
+        // Use the (possibly auto-relocated) Health offset so monster HP bars survive the same vital-
+        // block drift the player vitals do. _healthOff == Poe2.Life.Health unless drift was detected.
+        if (!_reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) return (0, 0);
         return (v.Current, v.Max);
     }
 

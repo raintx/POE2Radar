@@ -342,7 +342,14 @@ public sealed class RadarApp : IDisposable
     /// </summary>
     private void TickAutoFlask(nint localPlayer)
     {
-        if (_live.PlayerVitals(localPlayer) is not { } v) return;
+        // No plausible vitals read (Life component missing, or vital offsets drifted past the auto-
+        // relocation's reach): DON'T fire — firing on unknown HP would either spam or never trigger.
+        // Surface it so a post-patch break is visible instead of silently "armed but never fires".
+        if (_live.PlayerVitals(localPlayer) is not { } v)
+        {
+            _flaskNote = "paused (vitals unreadable — offsets may have drifted)";
+            return;
+        }
         _hpPct = v.HpPct; _manaPct = v.ManaPct;
 
         if (!_autoFlask) { _flaskNote = "OFF (F8)"; return; }

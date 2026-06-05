@@ -114,13 +114,16 @@ public static class Poe2
 
     // ── Components (offsets from the component object base) ───────────────────
 
-    /// <summary>Life — ✓ validated live (442/442 HP, 271 mana, 186/186 ES).</summary>
+    /// <summary>Life — ✓ re-validated live 2026-06-04 after the patch (980/980 HP, 427 mana, 274 ES).
+    /// The vital blocks slid (each grew ~8 bytes): Health 0x1A8→0x1B0, Mana 0x1F8→0x208, ES 0x230→0x248.
+    /// The VitalStruct's internal layout (Max@+0x2C, Current@+0x30) was UNCHANGED — only these
+    /// per-vital offsets moved. (Prior build: 442/442 HP, 271 mana, 186/186 ES at 0x1A8/0x1F8/0x230.)</summary>
     public static class Life
     {
         public const int Owner        = 0x008; // ComponentHeader.EntityPtr (back-pointer to entity)
-        public const int Health       = 0x1A8; // ✓ VitalStruct
-        public const int Mana         = 0x1F8; // ✓ VitalStruct
-        public const int EnergyShield = 0x230; // ✓ VitalStruct
+        public const int Health       = 0x1B0; // ✓ VitalStruct (was 0x1A8 pre-patch)
+        public const int Mana         = 0x208; // ✓ VitalStruct (was 0x1F8 pre-patch)
+        public const int EnergyShield = 0x248; // ✓ VitalStruct (was 0x230 pre-patch)
     }
 
     /// <summary>VitalStruct — ✓ (Max/Current confirmed). Reuse <see cref="VitalStruct"/> for reads.</summary>
