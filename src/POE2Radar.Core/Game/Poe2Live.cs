@@ -145,13 +145,36 @@ public sealed class Poe2Live
         return c != 0 && _reader.TryReadStruct<byte>(c + Poe2.PlayerComponent.Level, out var b) ? b : 0;
     }
 
+    /// <summary>Local character class (derived from Metadata path).</summary>
+    public string PlayerClass(nint localPlayer)
+    {
+        var details = ResolveComponent(localPlayer, "EntityDetails");
+        var metadata = details == 0 ? "" : ReadStdWString(details + Poe2.EntityDetails.Name);
+        if (string.IsNullOrEmpty(metadata)) return "";
+        var parts = metadata.Split('/');
+        if (parts.Length >= 3)
+        {
+            return parts[2] switch {
+                "Str" => "Warrior",
+                "Dex" => "Ranger",
+                "Int" => "Witch",
+                "DexInt" => "Monk",
+                "StrDex" => "Mercenary", // or Huntress
+                "StrInt" => "Sorceress",
+                var x => x
+            };
+        }
+        return metadata;
+    }
+
     /// <summary>Player grid position (from the Render component's world position ÷ grid ratio).</summary>
     public System.Numerics.Vector2? PlayerGrid(nint localPlayer) => EntityGrid(localPlayer);
 
-    public readonly record struct Vitals(int HpCur, int HpUnreserved, int ManaCur, int ManaUnreserved)
+    public readonly record struct Vitals(int HpCur, int HpUnreserved, int ManaCur, int ManaUnreserved, int EsCur, int EsUnreserved)
     {
         public float HpPct   => HpUnreserved   > 0 ? 100f * HpCur   / HpUnreserved   : 100f;
         public float ManaPct => ManaUnreserved > 0 ? 100f * ManaCur / ManaUnreserved : 100f;
+        public float EsPct   => EsUnreserved   > 0 ? 100f * EsCur   / EsUnreserved   : 100f;
     }
 
     private nint _plLife, _plLifeFor;
@@ -176,7 +199,7 @@ public sealed class Poe2Live
         // Drifted (or not loaded yet): scan the component for valid VitalStructs. After a hit, jump
         // past the struct's extent so the overlapping +4 false-positive isn't counted as a 2nd pool.
         var found = new List<int>(4);
-        for (var off = 0x80; off <= 0x400 && found.Count < 4;)
+        for (var off = 0x160; off <= 0x400 && found.Count < 4;)
         {
             if (_reader.TryReadStruct<VitalStruct>(lifeComp + off, out var v) && v.LooksValid())
             { found.Add(off); off += 0x34; }
@@ -211,7 +234,8 @@ public sealed class Poe2Live
         EnsureVitalOffsets(_plLife);
         if (!_reader.TryReadStruct<VitalStruct>(_plLife + _healthOff, out var hp) || hp.Max <= 0) return null;
         _reader.TryReadStruct<VitalStruct>(_plLife + _manaOff, out var mana);
-        return new Vitals(hp.Current, Unreserved(hp), mana.Current, Unreserved(mana));
+        _reader.TryReadStruct<VitalStruct>(_plLife + Poe2.Life.EnergyShield, out var es);
+        return new Vitals(hp.Current, Unreserved(hp), mana.Current, Unreserved(mana), es.Current, Unreserved(es));
     }
 
     private static int Unreserved(VitalStruct v)

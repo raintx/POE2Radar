@@ -83,6 +83,7 @@ public sealed class OverlayRenderer : IDisposable
         _bPath     = rt.CreateSolidColorBrush(PathPalette[0]);
         _bStyle    = rt.CreateSolidColorBrush(ColText);
         _tf = _window.DWriteFactory.CreateTextFormat("Consolas", null, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, 12f, "en-us");
+        _tf.WordWrapping = WordWrapping.NoWrap;
         _ready = true;
     }
 

@@ -122,7 +122,11 @@ public sealed class ApiServer : IDisposable
                     areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
                     areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
-                    hpPct = s.HpPct, manaPct = s.ManaPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
+                    hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct,
+                    hpCur = s.HpCur, hpMax = s.HpMax,
+                    manaCur = s.ManaCur, manaMax = s.ManaMax,
+                    esCur = s.EsCur, esMax = s.EsMax,
+                    autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
                     entityCount = s.Entities.Count,
                     poiCount = s.Entities.Count(e => e.Poi),
@@ -766,13 +770,21 @@ public sealed record RadarState(
     IReadOnlyList<Poe2Live.Landmark> Landmarks,
     float HpPct,
     float ManaPct,
+    float EsPct,
+    int HpCur,
+    int HpMax,
+    int ManaCur,
+    int ManaMax,
+    int EsCur,
+    int EsMax,
     bool AutoFlask,
     string FlaskNote,
     string AreaCode,
     string CharName,
-    int CharLevel)
+    int CharLevel,
+    string CharClass)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,
-            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, false, "", "", "", 0);
+            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, 100, 0, 0, 0, 0, 0, 0, false, "", "", "", 0, "");
 }

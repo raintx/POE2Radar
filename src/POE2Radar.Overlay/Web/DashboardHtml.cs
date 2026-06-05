@@ -16,7 +16,7 @@ internal static class DashboardHtml
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>POE2Radar — Console</title>
+<title>POE2Radar — Painel</title>
 <!-- Self-contained: no external fonts/CDNs. Falls back to local system serif/mono fonts. -->
 <style>
   :root{
@@ -95,6 +95,7 @@ internal static class DashboardHtml
   .bar > i{display:block; height:100%; transition:width .35s ease}
   .bar.hp > i{background:linear-gradient(90deg,#6e1f18,var(--blood-bright))}
   .bar.mana > i{background:linear-gradient(90deg,#23306e,var(--magic))}
+  .bar.es > i{background:linear-gradient(90deg,#2b516e,#56a2db)}
 
   .sect{font-family:"Cinzel","Georgia",serif; font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--gold); margin:24px 0 12px; display:flex; align-items:center; gap:10px}
   .sect::after{content:""; flex:1; height:1px; background:linear-gradient(90deg,var(--line),transparent)}
@@ -275,53 +276,58 @@ internal static class DashboardHtml
   <div class="body">
     <aside>
       <div class="vital">
-        <div class="vlabel"><span>Life</span><span class="num" id="hpNum">—</span></div>
+        <div class="vlabel"><span>Vida</span><span class="num" id="hpNum">—</span></div>
         <div class="bar hp"><i id="hpBar" style="width:0"></i></div>
       </div>
       <div class="vital">
         <div class="vlabel"><span>Mana</span><span class="num" id="mpNum">—</span></div>
         <div class="bar mana"><i id="mpBar" style="width:0"></i></div>
       </div>
+      <div class="vital">
+        <div class="vlabel"><span>Escudo</span><span class="num" id="esNum">—</span></div>
+        <div class="bar es"><i id="esBar" style="width:0"></i></div>
+      </div>
 
-      <div class="sect">Zone</div>
-      <div class="kv"><span>Area</span><span id="kAreaName">—</span></div>
-      <div class="kv"><span>Area code</span><span id="kArea">—</span></div>
-      <div class="kv"><span>Act / Level</span><span id="kAlvl">—</span></div>
-      <div class="kv"><span>Map open</span><span id="kMap">—</span></div>
-      <div class="kv"><span>Auto-flask</span><span id="kFlask">—</span></div>
+      <div class="sect">Zona</div>
+      <div class="kv"><span>Área</span><span id="kAreaName">—</span></div>
+      <div class="kv"><span>Cód. Área</span><span id="kArea">—</span></div>
+      <div class="kv"><span>Ato / Nível da Área</span><span id="kAlvl">—</span></div>
+      <div class="kv"><span>Personagem</span><span id="kChar">—</span></div>
+      <div class="kv"><span>Mapa aberto</span><span id="kMap">—</span></div>
+      <div class="kv"><span>Auto-poção</span><span id="kFlask">—</span></div>
       <div id="zoneNotes" class="znotes" hidden></div>
 
-      <div class="sect">Census</div>
+      <div class="sect">Censo</div>
       <div class="tally">
-        <div class="t"><div class="n" id="cEnt">0</div><div class="l">Entities</div></div>
-        <div class="t"><div class="n" id="cPoi">0</div><div class="l">Points of Int.</div></div>
-        <div class="t"><div class="n" id="cMon">0</div><div class="l">Monsters</div></div>
-        <div class="t"><div class="n" id="cLm">0</div><div class="l">Landmarks</div></div>
+        <div class="t"><div class="n" id="cEnt">0</div><div class="l">Entidades</div></div>
+        <div class="t"><div class="n" id="cPoi">0</div><div class="l">Pontos de Int.</div></div>
+        <div class="t"><div class="n" id="cMon">0</div><div class="l">Monstros</div></div>
+        <div class="t"><div class="n" id="cLm">0</div><div class="l">Pontos Ref.</div></div>
       </div>
       <div style="height:24px"></div>
     </aside>
 
     <main>
       <div class="tabs">
-        <button class="tab on" data-tab="dashboard">Dashboard</button>
-        <button class="tab" data-tab="filters">Filters</button>
-        <button class="tab" data-tab="settings">Settings</button>
+        <button class="tab on" data-tab="dashboard">Painel</button>
+        <button class="tab" data-tab="filters">Filtros</button>
+        <button class="tab" data-tab="settings">Configurações</button>
       </div>
 
       <section class="view" data-view="dashboard">
         <div class="controls">
-          <input type="search" id="navSearch" placeholder="search entities, landmarks, tiles…" />
-          <button class="chip on" id="navAlive">Alive only</button>
-          <button class="chip" id="navClear">Clear paths</button>
+          <input type="search" id="navSearch" placeholder="buscar entidades, pontos, tiles…" />
+          <button class="chip on" id="navAlive">Apenas vivos</button>
+          <button class="chip" id="navClear">Limpar rotas</button>
           <span style="color:var(--ink-faint);font-size:11px" id="navCount"></span>
         </div>
         <div class="controls" id="kindChips">
-          <button class="chip on" data-kind="all">All</button>
-          <button class="chip" data-kind="landmarks">Landmarks &amp; tiles</button>
-          <button class="chip" data-kind="entities">Entities</button>
+          <button class="chip on" data-kind="all">Todos</button>
+          <button class="chip" data-kind="landmarks">Pontos Ref. &amp; Terreno</button>
+          <button class="chip" data-kind="entities">Entidades</button>
         </div>
         <div id="navList"></div>
-        <div class="empty" id="navEmpty" hidden>Nothing to navigate to here.</div>
+        <div class="empty" id="navEmpty" hidden>Nada para navegar aqui.</div>
       </section>
 
       <section class="view" data-view="filters" hidden>
@@ -379,26 +385,26 @@ internal static class DashboardHtml
       <section class="view" data-view="settings" hidden>
         <div class="panel-grid">
           <div class="card">
-            <h3>Radar Display</h3>
-            <div class="row"><div class="rl">Show monsters<small>enemy dots on the map overlay</small></div>
+            <h3>Exibição do Radar</h3>
+            <div class="row"><div class="rl">Mostrar monstros<small>pontos inimigos no mapa</small></div>
               <label class="sw"><input type="checkbox" data-set="showMonsters"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Show terrain<small>walkable-terrain bitmap</small></div>
+            <div class="row"><div class="rl">Mostrar terreno<small>mapa de terreno andável</small></div>
               <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Show player blip<small>blue dot marking your own position</small></div>
+            <div class="row"><div class="rl">Mostrar jogador<small>ponto azul marcando sua posição</small></div>
               <label class="sw"><input type="checkbox" data-set="showPlayerBlip"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Hide junk entities<small>suppress cosmetic / FX / daemon dots</small></div>
+            <div class="row"><div class="rl">Ocultar entidades inúteis<small>suprimir FX e demônios invisíveis</small></div>
               <label class="sw"><input type="checkbox" data-set="hideJunk"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Navigation paths<small>draw A&#42; routes to selected landmarks</small></div>
+            <div class="row"><div class="rl">Rotas de navegação<small>desenhar rotas A&#42; até os pontos</small></div>
               <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Curated landmark names<small>community labels (boss / reward / exits)</small></div>
+            <div class="row"><div class="rl">Pontos Curados<small>nomes da comunidade (chefe / saídas)</small></div>
               <label class="sw"><input type="checkbox" data-set="useCuratedLandmarks"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Overlay FPS cap<small>lower = less load on the game; 60 is smooth for a radar (15&ndash;360)</small></div>
+            <div class="row"><div class="rl">Limite FPS (Overlay)<small>menor = menos carga; 60 é fluido (15&ndash;360)</small></div>
               <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
           </div>
           <div class="card">
-            <h3>Monster HP Bars <span class="tag">&middot; by rarity</span></h3>
+            <h3>Barras HP Monstros <span class="tag">&middot; por raridade</span></h3>
             <div class="hpgrid">
-              <span class="hph">Rarity</span><span class="hph">Show</span><span class="hph">Width</span><span class="hph">Border</span><span class="hph">Thick</span>
+              <span class="hph">Raridade</span><span class="hph">Mostrar</span><span class="hph">Larg.</span><span class="hph">Borda</span><span class="hph">Esp.</span>
               <span class="hpr">Normal</span>
               <label class="sw"><input type="checkbox" data-set="hpBarNormal"><span class="track"></span><span class="knob"></span></label>
               <input class="numin" type="number" step="1" min="4" data-hp="widthNormal">
@@ -450,20 +456,20 @@ internal static class DashboardHtml
             <div class="row"><div class="rl hint-row">Adjust here &mdash; changes apply live (no in-game hotkeys).</div></div>
           </div>
           <div class="card">
-            <h3>Auto-Flask</h3>
-            <div class="row"><div class="rl">Life threshold %<small>tap life flask below this Life %</small></div>
+            <h3>Auto-Poção</h3>
+            <div class="row"><div class="rl">Limite Vida %<small>usar poção abaixo dessa %</small></div>
               <input class="numin" type="number" step="1" min="0" max="100" data-set="lifeThresholdPct"></div>
-            <div class="row"><div class="rl">Mana threshold %<small>tap mana flask below this Mana %</small></div>
+            <div class="row"><div class="rl">Limite Mana %<small>usar poção abaixo dessa %</small></div>
               <input class="numin" type="number" step="1" min="0" max="100" data-set="manaThresholdPct"></div>
-            <div class="row"><div class="rl">Life flask key</div>
+            <div class="row"><div class="rl">Tecla Poção de Vida</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="lifeKey"></div>
-            <div class="row"><div class="rl">Mana flask key</div>
+            <div class="row"><div class="rl">Tecla Poção de Mana</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="manaKey"></div>
-            <div class="row"><div class="rl">Life cooldown<small>min ms between life taps</small></div>
+            <div class="row"><div class="rl">Cooldown Vida<small>ms mínimo entre poções</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="lifeCooldownMs"></div>
-            <div class="row"><div class="rl">Mana cooldown<small>min ms between mana taps</small></div>
+            <div class="row"><div class="rl">Cooldown Mana<small>ms mínimo entre poções</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
-            <div class="row"><div class="rl hint-row">F8 toggles auto-flask in-game. Status: <span id="flaskState">&mdash;</span></div></div>
+            <div class="row"><div class="rl hint-row">F8 alterna a auto-poção in-game. Status: <span id="flaskState">&mdash;</span></div></div>
           </div>
           <div class="card" style="grid-column:1/-1">
             <h3>Radar Icons <span class="tag">&middot; shape &middot; color &middot; opacity &middot; size</span></h3>
@@ -543,7 +549,7 @@ function prettify(m){
 }
 function navRows(){
   const rows=[];
-  for(const l of landmarks) rows.push({id:'t:'+l.path, name:l.curatedName||l.name||'Landmark', kind:'Landmark', tag:'tile', dist:l.dist, key:l.path||''});
+  for(const l of landmarks) rows.push({id:'t:'+l.path, name:l.curatedName||l.name||'Marco', kind:'Landmark', tag:'tile', dist:l.dist, key:l.path||''});
   for(const e of entities){
     if(aliveOnly && !e.alive) continue;
     const tag = e.poi ? 'POI' : (e.rarity && e.rarity!=='NonMonster' ? e.rarity : e.category);
@@ -558,7 +564,7 @@ function renderDashboard(){
   if(search) rows=rows.filter(r=>r.name.toLowerCase().includes(search)||r.key.toLowerCase().includes(search));
   rows.sort((a,b)=>{ const sa=selected.has(a.id), sb=selected.has(b.id); if(sa!==sb) return sa?-1:1; return (a.dist||0)-(b.dist||0); });
   const shown=rows.slice(0,400);
-  $('#navCount').textContent = rows.length+' targets'+(rows.length>shown.length?' · showing 400':'');
+  $('#navCount').textContent = rows.length+' alvos'+(rows.length>shown.length?' · mostrando 400':'');
   $('#navEmpty').hidden = rows.length>0;
   $('#navList').innerHTML = shown.map(r=>{
     const sel=selected.has(r.id), col=sel?PALETTE[(selected.get(r.id)||0)%8]:'';
@@ -898,22 +904,28 @@ $('#lmpatPattern').onkeydown=e=>{ if(e.key==='Enter') $('#lmpatAdd').click(); };
 /* ── left rail ── */
 function renderState(){
   const s=state; if(!s) return;
-  const hp=Math.max(0,Math.min(100,s.hpPct||0)), mp=Math.max(0,Math.min(100,s.manaPct||0));
-  $('#hpBar').style.width=hp+'%'; $('#mpBar').style.width=mp+'%';
-  $('#hpNum').textContent=hp.toFixed(0)+'%'; $('#mpNum').textContent=mp.toFixed(0)+'%';
+  const hp=Math.max(0,Math.min(100,s.hpPct||0)), mp=Math.max(0,Math.min(100,s.manaPct||0)), es=Math.max(0,Math.min(100,s.esPct||0));
+  $('#hpBar').style.width=hp+'%'; $('#mpBar').style.width=mp+'%'; $('#esBar').style.width=es+'%';
+  $('#hpNum').textContent = `${s.hpCur}/${s.hpMax} (${hp.toFixed(0)}%)`;
+  $('#mpNum').textContent = `${s.manaCur}/${s.manaMax} (${mp.toFixed(0)}%)`;
+  $('#esNum').textContent = `${s.esCur}/${s.esMax} (${es.toFixed(0)}%)`;
   const areaName=(s.areaName&&s.areaName!==s.areaCode)?s.areaName:'';
   $('#kAreaName').textContent=areaName||s.areaCode||'—';
   $('#kArea').textContent=s.areaCode||'—';
   const act=s.areaAct||0;
-  $('#kAlvl').textContent=(act?'Act '+act+' · ':'')+(s.areaLevel?('lvl '+s.areaLevel):'—');
-  $('#kMap').textContent=s.mapVisible?'yes':'no';
-  $('#kFlask').textContent=(s.autoFlask?'on':'off')+(s.flask?' · '+s.flask:'');
-  const fs=$('#flaskState'); if(fs) fs.textContent=(s.autoFlask?'ON':'OFF')+(s.flask?' · '+s.flask:'');
+  $('#kAlvl').textContent=(act?'Ato '+act+' · ':'')+(s.areaLevel?('Área Lvl '+s.areaLevel):'—');
+  const name = s.charName || 'Você';
+  const cls = s.charClass || '?';
+  const lvl = s.charLevel ? 'Lvl ' + s.charLevel : '';
+  $('#kChar').textContent = name + ' > ' + cls + (lvl ? ' > ' + lvl : '');
+  $('#kMap').textContent=s.mapVisible?'sim':'não';
+  $('#kFlask').textContent=(s.autoFlask?'ligado':'desligado')+(s.flask?' · '+s.flask:'');
+  const fs=$('#flaskState'); if(fs) fs.textContent=(s.autoFlask?'LIGADO':'DESLIGADO')+(s.flask?' · '+s.flask:'');
   $('#cEnt').textContent=s.entityCount||0;
   $('#cPoi').textContent=s.poiCount||0;
   $('#cMon').textContent=(s.counts&&s.counts.Monster)||0;
   $('#cLm').textContent=s.landmarkCount||0;
-  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>·</b> ' + (s.inGame?'in game':'town/menu');
+  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>·</b> ' + (s.inGame?'no jogo':'cidade/menu');
 
   // Zone leveling notes (from /api/zone): title + note text, hidden when there's nothing to show.
   const zn=$('#zoneNotes');

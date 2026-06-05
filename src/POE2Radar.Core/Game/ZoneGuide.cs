@@ -93,9 +93,9 @@ public sealed class ZoneGuide
     public string FriendlyName(string areaCode)
         => Area(areaCode) is { Name.Length: > 0 } a ? a.Name : areaCode;
 
-    /// <summary>"Act N" string for an area, or "" when the act is unknown.</summary>
+    /// <summary>"Ato N" string for an area, or "" when the act is unknown.</summary>
     public string ActLabel(string areaCode)
-        => Area(areaCode) is { Act: > 0 } a ? $"Act {a.Act}" : "";
+        => Area(areaCode) is { Act: > 0 } a ? $"Ato {a.Act}" : "";
 
     /// <summary>
     /// Leveling notes for an area: the zone-specific note if present, else the act-level note.
@@ -104,11 +104,12 @@ public sealed class ZoneGuide
     public (string Title, string Notes)? Notes(string areaCode)
     {
         if (Area(areaCode) is not { } a) return null;
-        var actLabel = a.Act > 0 ? $"Act {a.Act}" : "";
-        var title = actLabel.Length > 0 ? $"{actLabel} — {a.Name}" : a.Name;
+        var actKey = a.Act > 0 ? $"Act {a.Act}" : "";
+        var actDisplay = a.Act > 0 ? $"Ato {a.Act}" : "";
+        var title = actDisplay.Length > 0 ? $"{actDisplay} — {a.Name}" : a.Name;
 
         var notes = _zoneNotes.GetValueOrDefault(areaCode, "");
-        if (notes.Length == 0 && actLabel.Length > 0) notes = _actNotes.GetValueOrDefault(actLabel, "");
+        if (notes.Length == 0 && actKey.Length > 0) notes = _actNotes.GetValueOrDefault(actKey, "");
         return (title, notes);
     }
 }

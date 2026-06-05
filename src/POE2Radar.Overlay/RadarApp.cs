@@ -53,10 +53,13 @@ public sealed class RadarApp : IDisposable
     private DateTime _nextToggleAt = DateTime.MinValue;
     private DateTime _nextPathKeyAt = DateTime.MinValue;
     private DateTime _nextBrowserAt = DateTime.MinValue;
-    private float _hpPct = 100f, _manaPct = 100f;
+    private float _hpPct = 100f, _manaPct = 100f, _esPct = 100f;
+    private int _hpCur, _hpMax, _manaCur, _manaMax, _esCur, _esMax;
     private string _flaskNote = "";
-    private string _areaCode = "", _charName = "";
+    private string _areaCode = "";
+    private string _charName = "";
     private int _charLevel;
+    private string _charClass = "";
     private float[]? _cameraMatrix;
 
     // Render inputs rebuilt at world rate (30 Hz), not per render frame: they only change with the
@@ -90,6 +93,7 @@ public sealed class RadarApp : IDisposable
     // from this list on the tick thread only — mutators (in-game + API) just edit _selectedIds.
     private readonly object _navLock = new();
     private readonly List<string> _selectedIds = new();                  // selected target ids (order drives the color slot)
+    private readonly HashSet<string> _autoSelectedThisZone = new();
     private List<SelectedPath> _selectedPaths = new();                   // one route per selected target (from trackers)
     private bool _selectionCapWarned;                                    // log the "cap reached" notice once
     private nint _navTargetsArea = -1;                                   // AreaInstance the auto-nav was applied for
@@ -164,6 +168,7 @@ public sealed class RadarApp : IDisposable
             _areaCode = _live.AreaCode(areaInstance);
             _charName = _live.PlayerName(localPlayer);
             _charLevel = _live.PlayerLevel(localPlayer);
+            _charClass = _live.PlayerClass(localPlayer);
             _cameraMatrix = _live.CameraMatrix(inGameState);
             TickAutoFlask(localPlayer);
 
@@ -189,6 +194,33 @@ public sealed class RadarApp : IDisposable
                 // Rebuild the unified navigation-target list (tiles + entity POIs) for this tick.
                 _navTargets = BuildNavTargets(player);
 
+                // Auto-deselect targets that are no longer drawable (dead, opened, or IconComplete)
+                lock (_navLock)
+                {
+                    for (int i = _selectedIds.Count - 1; i >= 0; i--)
+                    {
+                        var id = _selectedIds[i];
+                        if (id.StartsWith("e:", StringComparison.Ordinal) && uint.TryParse(id.Substring(2), out var eid))
+                        {
+                            foreach (var e in _entities)
+                            {
+                                if (e.Id == eid)
+                                {
+                                    bool isDrawable = !(e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive)
+                                                      && !(e.Category == Poe2Live.EntityCategory.Chest && e.Opened)
+                                                      && !e.IconComplete;
+                                    if (!isDrawable)
+                                    {
+                                        _selectedIds.RemoveAt(i);
+                                        Console.WriteLine($"\nPath targets: auto-removed {EntityLabel(e.Metadata)} (completed/dead)");
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // On a zone change: drop the (now-stale) selection, then apply the persistent
                 // auto-nav patterns against the new zone's targets. Keyed off the AreaInstance
                 // address (a fresh object per area), same signal the per-area caches use.
@@ -196,6 +228,26 @@ public sealed class RadarApp : IDisposable
                 {
                     _navTargetsArea = areaInstance;
                     OnAreaChanged();
+                }
+
+                // Dynamic Auto-Nav evaluation for targets that spawn late (e.g. towers loading dynamically)
+                if (_settings.AutoNavPatterns.Count > 0)
+                {
+                    lock (_navLock)
+                    {
+                        foreach (var t in _navTargets)
+                        {
+                            if (!_autoSelectedThisZone.Contains(t.Id))
+                            {
+                                _autoSelectedThisZone.Add(t.Id);
+                                if (_selectedIds.Count < MaxSelectedTargets && MatchesAutoNav(t.MatchKey) && !_selectedIds.Contains(t.Id))
+                                {
+                                    _selectedIds.Add(t.Id);
+                                    Console.WriteLine($"\nAuto-nav: selected 1 target(s) dynamically.");
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Per-tick route maintenance (draw-only, NO A* on this thread). For each selected
@@ -215,7 +267,7 @@ public sealed class RadarApp : IDisposable
         }
 
         _state = new RadarState(inGame, _areaHash, areaLevel, map.IsVisible, map.Zoom, player, _entities, _landmarks,
-            _hpPct, _manaPct, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel);
+            _hpPct, _manaPct, _esPct, _hpCur, _hpMax, _manaCur, _manaMax, _esCur, _esMax, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel, _charClass);
 
         var ctx = new RenderContext(
             InGame: inGame,
@@ -350,7 +402,10 @@ public sealed class RadarApp : IDisposable
             _flaskNote = "paused (vitals unreadable — offsets may have drifted)";
             return;
         }
-        _hpPct = v.HpPct; _manaPct = v.ManaPct;
+        _hpPct = v.HpPct; _manaPct = v.ManaPct; _esPct = v.EsPct;
+        _hpCur = v.HpCur; _hpMax = v.HpUnreserved;
+        _manaCur = v.ManaCur; _manaMax = v.ManaUnreserved;
+        _esCur = v.EsCur; _esMax = v.EsUnreserved;
 
         if (!_autoFlask) { _flaskNote = "OFF (F8)"; return; }
         if (GetForegroundWindow() != _gameHwnd) { _flaskNote = "paused (PoE2 not focused)"; return; }
@@ -468,17 +523,9 @@ public sealed class RadarApp : IDisposable
         lock (_navLock)
         {
             _selectedIds.Clear();
+            _autoSelectedThisZone.Clear();
             _selectionCapWarned = false;
 
-            if (_settings.AutoNavPatterns.Count > 0)
-            {
-                foreach (var t in _navTargets)
-                {
-                    if (_selectedIds.Count >= MaxSelectedTargets) break;
-                    if (MatchesAutoNav(t.MatchKey) && !_selectedIds.Contains(t.Id))
-                        _selectedIds.Add(t.Id);
-                }
-            }
             count = _selectedIds.Count;
         }
         _selectedPaths = new List<SelectedPath>();
