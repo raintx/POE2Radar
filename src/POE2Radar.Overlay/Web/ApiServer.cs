@@ -116,11 +116,11 @@ public sealed class ApiServer : IDisposable
                     .ToDictionary(g => g.Key.ToString(), g => g.Count());
                 Write(ctx, 200, JsonSerializer.Serialize(new
                 {
-                    // Character name + level intentionally omitted (privacy: this endpoint is local
-                    // but unauthenticated, and screenshots/streams shouldn't leak the character).
                     s.InGame, areaCode = s.AreaCode, areaHash = s.AreaHash, areaLevel = s.AreaLevel,
                     areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
                     areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
+                    areaSeconds = s.AreaSeconds,
+                    charName = s.CharName, charLevel = s.CharLevel, charClass = s.CharClass,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
                     hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct,
                     hpCur = s.HpCur, hpMax = s.HpMax,
@@ -782,9 +782,10 @@ public sealed record RadarState(
     string AreaCode,
     string CharName,
     int CharLevel,
-    string CharClass)
+    string CharClass,
+    int AreaSeconds)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,
-            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, 100, 0, 0, 0, 0, 0, 0, false, "", "", "", 0, "");
+            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, 100, 0, 0, 0, 0, 0, 0, false, "", "", "", 0, "", 0);
 }

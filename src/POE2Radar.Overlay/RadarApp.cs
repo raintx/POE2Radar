@@ -97,6 +97,7 @@ public sealed class RadarApp : IDisposable
     private List<SelectedPath> _selectedPaths = new();                   // one route per selected target (from trackers)
     private bool _selectionCapWarned;                                    // log the "cap reached" notice once
     private nint _navTargetsArea = -1;                                   // AreaInstance the auto-nav was applied for
+    private long _areaEntryTick;                                         // TickCount64 when the area was entered
 
     // ── Collapsible "POE2Radar" navigation menu widget state (drawn always-on; persisted corner). ──
     private bool _navMenuExpanded;                                       // dropdown open? (default collapsed)
@@ -266,8 +267,10 @@ public sealed class RadarApp : IDisposable
             _selectedPaths = new List<SelectedPath>();
         }
 
+        int areaSeconds = _areaEntryTick > 0 ? (int)((Environment.TickCount64 - _areaEntryTick) / 1000) : 0;
+
         _state = new RadarState(inGame, _areaHash, areaLevel, map.IsVisible, map.Zoom, player, _entities, _landmarks,
-            _hpPct, _manaPct, _esPct, _hpCur, _hpMax, _manaCur, _manaMax, _esCur, _esMax, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel, _charClass);
+            _hpPct, _manaPct, _esPct, _hpCur, _hpMax, _manaCur, _manaMax, _esCur, _esMax, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel, _charClass, areaSeconds);
 
         var ctx = new RenderContext(
             InGame: inGame,
@@ -515,6 +518,8 @@ public sealed class RadarApp : IDisposable
     /// against the new zone's <see cref="_navTargets"/> so e.g. the expedition encounter is auto-pathed.</summary>
     private void OnAreaChanged()
     {
+        _areaEntryTick = Environment.TickCount64;
+
         // Drop the stale selection (under the lock), then apply the persistent auto-nav patterns
         // against the new zone's targets. Trackers are NOT touched here — the per-tick reconciliation
         // (ReconcileTrackers) creates/removes them to match _selectedIds; in-flight results for the

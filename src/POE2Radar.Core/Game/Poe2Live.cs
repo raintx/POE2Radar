@@ -148,12 +148,14 @@ public sealed class Poe2Live
     /// <summary>Local character class (derived from Metadata path).</summary>
     public string PlayerClass(nint localPlayer)
     {
-        var details = ResolveComponent(localPlayer, "EntityDetails");
-        var metadata = details == 0 ? "" : ReadStdWString(details + Poe2.EntityDetails.Name);
+        var metadata = ReadMetadata(localPlayer);
         if (string.IsNullOrEmpty(metadata)) return "";
         var parts = metadata.Split('/');
         if (parts.Length >= 3)
         {
+            var last = parts[^1];
+            if (last == "StrIntFourb") return "Druid";
+            
             return parts[2] switch {
                 "Str" => "Warrior",
                 "Dex" => "Ranger",

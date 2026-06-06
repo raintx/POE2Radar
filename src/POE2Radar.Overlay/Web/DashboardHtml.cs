@@ -275,26 +275,29 @@ internal static class DashboardHtml
 
   <div class="body">
     <aside>
+      <div class="char-box" id="charBox" hidden>
+        <span id="cbName">Você</span> <span class="arr">&gt;</span> <span id="cbClass">?</span> <span id="cbLvl" class="arr"></span>
+      </div>
       <div class="vital">
-        <div class="vlabel"><span>Vida</span><span class="num" id="hpNum">—</span></div>
+        <div class="vlabel"><span data-i18n="life">Vida</span><span class="num" id="hpNum">—</span></div>
         <div class="bar hp"><i id="hpBar" style="width:0"></i></div>
       </div>
       <div class="vital">
-        <div class="vlabel"><span>Mana</span><span class="num" id="mpNum">—</span></div>
+        <div class="vlabel"><span data-i18n="mana">Mana</span><span class="num" id="mpNum">—</span></div>
         <div class="bar mana"><i id="mpBar" style="width:0"></i></div>
       </div>
       <div class="vital">
-        <div class="vlabel"><span>Escudo</span><span class="num" id="esNum">—</span></div>
+        <div class="vlabel"><span data-i18n="shield">Escudo</span><span class="num" id="esNum">—</span></div>
         <div class="bar es"><i id="esBar" style="width:0"></i></div>
       </div>
 
-      <div class="sect">Zona</div>
-      <div class="kv"><span>Área</span><span id="kAreaName">—</span></div>
-      <div class="kv"><span>Cód. Área</span><span id="kArea">—</span></div>
-      <div class="kv"><span>Ato / Nível da Área</span><span id="kAlvl">—</span></div>
-      <div class="kv"><span>Personagem</span><span id="kChar">—</span></div>
-      <div class="kv"><span>Mapa aberto</span><span id="kMap">—</span></div>
-      <div class="kv"><span>Auto-poção</span><span id="kFlask">—</span></div>
+      <div class="sect" data-i18n="zone">Zona</div>
+      <div class="kv"><span data-i18n="area">Área</span><span id="kAreaName">—</span></div>
+      <div class="kv"><span data-i18n="areaCode">Cód. Área</span><span id="kArea">—</span></div>
+      <div class="kv"><span data-i18n="areaLvl">Ato / Nível da Área</span><span id="kAlvl">—</span></div>
+      <div class="kv"><span data-i18n="activeTime">Tempo Ativo</span><span id="kTime">—</span></div>
+      <div class="kv"><span data-i18n="mapOpen">Mapa aberto</span><span id="kMap">—</span></div>
+      <div class="kv"><span data-i18n="autoFlask">Auto-poção</span><span id="kFlask">—</span></div>
       <div id="zoneNotes" class="znotes" hidden></div>
 
       <div class="sect">Censo</div>
@@ -392,8 +395,18 @@ internal static class DashboardHtml
               <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Mostrar jogador<small>ponto azul marcando sua posição</small></div>
               <label class="sw"><input type="checkbox" data-set="showPlayerBlip"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Ocultar entidades inúteis<small>suprimir FX e demônios invisíveis</small></div>
-              <label class="sw"><input type="checkbox" data-set="hideJunk"><span class="track"></span><span class="knob"></span></label></div>
+            <label class="row" style="cursor:pointer">
+              <span class="rl" data-i18n="streamerMode">Modo Streamer<small data-i18n="streamerDesc">Ocultar o nome e o level do seu personagem do radar para privacidade.</small></span>
+              <div class="sw"><input type="checkbox" id="setStreamer"><div class="track"></div><div class="knob"></div></div>
+            </label>
+            <label class="row" style="cursor:pointer">
+              <span class="rl" data-i18n="language">Idioma<small data-i18n="langDesc">Escolha o idioma do painel.</small></span>
+              <select id="setLang" style="background:#0c0a07;color:var(--ink);border:1px solid var(--line);border-radius:2px;padding:3px 6px;font-family:inherit;font-size:11px">
+                <option value="auto">Automático (Navegador)</option>
+                <option value="pt">Português (Brasil)</option>
+                <option value="en">English</option>
+              </select>
+            </label>
             <div class="row"><div class="rl">Rotas de navegação<small>desenhar rotas A&#42; até os pontos</small></div>
               <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Pontos Curados<small>nomes da comunidade (chefe / saídas)</small></div>
@@ -913,19 +926,43 @@ function renderState(){
   $('#kAreaName').textContent=areaName||s.areaCode||'—';
   $('#kArea').textContent=s.areaCode||'—';
   const act=s.areaAct||0;
-  $('#kAlvl').textContent=(act?'Ato '+act+' · ':'')+(s.areaLevel?('Área Lvl '+s.areaLevel):'—');
-  const name = s.charName || 'Você';
+  $('#kAlvl').textContent=(act?`${i18n.act} ${act} · `:'')+(s.areaLevel?(`${i18n.areaLvlNum} ${s.areaLevel}`):'—');
+  
+  // Streamer Mode / Char Info
+  const isStreamer = $('#setStreamer').checked;
+  const name = s.charName || i18n.you;
   const cls = s.charClass || '?';
   const lvl = s.charLevel ? 'Lvl ' + s.charLevel : '';
-  $('#kChar').textContent = name + ' > ' + cls + (lvl ? ' > ' + lvl : '');
-  $('#kMap').textContent=s.mapVisible?'sim':'não';
-  $('#kFlask').textContent=(s.autoFlask?'ligado':'desligado')+(s.flask?' · '+s.flask:'');
+  
+  if (isStreamer) {
+    $('#charBox').hidden = false;
+    $('#cbName').textContent = i18n.hidden;
+    $('#cbClass').textContent = cls;
+    $('#cbLvl').textContent = '';
+  } else {
+    $('#charBox').hidden = false;
+    $('#cbName').textContent = name;
+    $('#cbClass').textContent = cls;
+    $('#cbLvl').textContent = lvl ? `> ${lvl}` : '';
+  }
+
+  // Active Map Time
+  if (s.inGame && s.areaSeconds != null && s.areaSeconds > 0) {
+    const mins = Math.floor(s.areaSeconds / 60);
+    const secs = s.areaSeconds % 60;
+    $('#kTime').textContent = `${mins}m ${secs}s`;
+  } else {
+    $('#kTime').textContent = '—';
+  }
+
+  $('#kMap').textContent=s.mapVisible?i18n.yes:i18n.no;
+  $('#kFlask').textContent=(s.autoFlask?i18n.on:i18n.off)+(s.flask?' · '+s.flask:'');
   const fs=$('#flaskState'); if(fs) fs.textContent=(s.autoFlask?'LIGADO':'DESLIGADO')+(s.flask?' · '+s.flask:'');
   $('#cEnt').textContent=s.entityCount||0;
   $('#cPoi').textContent=s.poiCount||0;
   $('#cMon').textContent=(s.counts&&s.counts.Monster)||0;
   $('#cLm').textContent=s.landmarkCount||0;
-  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>·</b> ' + (s.inGame?'no jogo':'cidade/menu');
+  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>·</b> ' + (s.inGame?i18n.inGame:i18n.menu);
 
   // Zone leveling notes (from /api/zone): title + note text, hidden when there's nothing to show.
   const zn=$('#zoneNotes');
@@ -935,6 +972,49 @@ function renderState(){
   } else { zn.hidden=true; }
 }
 
+// -- i18n and init --
+const dict = {
+  pt: { life:"Vida", mana:"Mana", shield:"Escudo", zone:"Zona", area:"Área", areaCode:"Cód. Área", areaLvl:"Ato / Nível da Área", activeTime:"Tempo Ativo", mapOpen:"Mapa aberto", autoFlask:"Auto-poção", streamerMode:"Modo Streamer", streamerDesc:"Ocultar o nome e o level do seu personagem do radar para privacidade.", language:"Idioma", langDesc:"Escolha o idioma do painel.", you:"Você", hidden:"Oculto", act:"Ato", areaLvlNum:"Área Lvl", yes:"sim", no:"não", on:"ligado", off:"desligado", inGame:"no jogo", menu:"cidade/menu" },
+  en: { life:"Life", mana:"Mana", shield:"Shield", zone:"Zone", area:"Area", areaCode:"Area Code", areaLvl:"Act / Area Level", activeTime:"Active Time", mapOpen:"Map Open", autoFlask:"Auto-Flask", streamerMode:"Streamer Mode", streamerDesc:"Hide your character name and level from the radar for privacy.", language:"Language", langDesc:"Choose the dashboard language.", you:"You", hidden:"Hidden", act:"Act", areaLvlNum:"Area Lvl", yes:"yes", no:"no", on:"on", off:"off", inGame:"in game", menu:"town/menu" }
+};
+let i18n = dict.pt;
+
+function applyTranslations() {
+  const saved = localStorage.getItem('langPref') || 'auto';
+  if (saved === 'auto') {
+    $('#setLang').value = 'auto';
+    const lang = navigator.language.startsWith('pt') ? 'pt' : 'en';
+    i18n = dict[lang];
+  } else {
+    $('#setLang').value = saved;
+    i18n = dict[saved] || dict.en;
+  }
+
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (i18n[key]) el.innerHTML = el.innerHTML.replace(/^[^<]+/, i18n[key]);
+  });
+}
+
+const sm = document.getElementById('setStreamer');
+if(sm) {
+  sm.checked = localStorage.getItem('streamerMode') === '1';
+  sm.onchange = (e) => {
+    localStorage.setItem('streamerMode', e.target.checked ? '1' : '0');
+    renderState();
+  };
+}
+
+const langSel = document.getElementById('setLang');
+if(langSel) {
+  langSel.onchange = (e) => {
+    localStorage.setItem('langPref', e.target.value);
+    applyTranslations();
+    renderState();
+  };
+}
+
+applyTranslations();
 wireSettings(); wireHpBars(); wireTerrain(); loadIcons().then(loadSettings);
 tick(); setInterval(tick, 1000);
 </script>
