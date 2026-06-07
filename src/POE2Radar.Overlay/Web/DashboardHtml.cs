@@ -300,100 +300,100 @@ internal static class DashboardHtml
       <div class="kv"><span data-i18n="autoFlask">Auto-poção</span><span id="kFlask">—</span></div>
       <div id="zoneNotes" class="znotes" hidden></div>
 
-      <div class="sect">Censo</div>
+      <div class="sect"><span data-i18n="censo">Censo</span></div>
       <div class="tally">
-        <div class="t"><div class="n" id="cEnt">0</div><div class="l">Entidades</div></div>
-        <div class="t"><div class="n" id="cPoi">0</div><div class="l">Pontos de Int.</div></div>
-        <div class="t"><div class="n" id="cMon">0</div><div class="l">Monstros</div></div>
-        <div class="t"><div class="n" id="cLm">0</div><div class="l">Pontos Ref.</div></div>
+        <div class="t"><div class="n" id="cEnt">0</div><div class="l" data-i18n="cEnt">Entidades</div></div>
+        <div class="t"><div class="n" id="cPoi">0</div><div class="l" data-i18n="cPoi">Pontos de Int.</div></div>
+        <div class="t"><div class="n" id="cMon">0</div><div class="l" data-i18n="cMon">Monstros</div></div>
+        <div class="t"><div class="n" id="cLm">0</div><div class="l" data-i18n="cLm">Pontos Ref.</div></div>
       </div>
       <div style="height:24px"></div>
     </aside>
 
     <main>
       <div class="tabs">
-        <button class="tab on" data-tab="dashboard">Painel</button>
-        <button class="tab" data-tab="filters">Filtros</button>
-        <button class="tab" data-tab="settings">Configurações</button>
+        <button class="tab on" data-tab="dashboard" data-i18n="tabDash">Painel</button>
+        <button class="tab" data-tab="filters" data-i18n="tabFilters">Filtros</button>
+        <button class="tab" data-tab="settings" data-i18n="tabSettings">Configurações</button>
       </div>
 
       <section class="view" data-view="dashboard">
         <div class="controls">
-          <input type="search" id="navSearch" placeholder="buscar entidades, pontos, tiles…" />
-          <button class="chip on" id="navAlive">Apenas vivos</button>
-          <button class="chip" id="navClear">Limpar rotas</button>
+          <input type="search" id="navSearch" placeholder="buscar entidades, pontos, tiles…" data-i18n-ph="navSearchPh" />
+          <button class="chip on" id="navAlive" data-i18n="navAlive">Apenas vivos</button>
+          <button class="chip" id="navClear" data-i18n="navClear">Limpar rotas</button>
           <span style="color:var(--ink-faint);font-size:11px" id="navCount"></span>
         </div>
         <div class="controls" id="kindChips">
-          <button class="chip on" data-kind="all">Todos</button>
-          <button class="chip" data-kind="landmarks">Pontos Ref. &amp; Terreno</button>
-          <button class="chip" data-kind="entities">Entidades</button>
+          <button class="chip on" data-kind="all" data-i18n="kindAll">Todos</button>
+          <button class="chip" data-kind="landmarks" data-i18n="kindLmt">Pontos Ref. &amp; Terreno</button>
+          <button class="chip" data-kind="entities" data-i18n="kindEnt">Entidades</button>
         </div>
         <div id="navList"></div>
-        <div class="empty" id="navEmpty" hidden>Nada para navegar aqui.</div>
+        <div class="empty" id="navEmpty" hidden data-i18n="navEmpty">Nada para navegar aqui.</div>
       </section>
 
       <section class="view" data-view="filters" hidden>
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
-            <h3>Watched <span class="tag">&middot; highlight + label by metadata</span></h3>
-            <div class="row"><div class="rl hint-row">Entities whose metadata contains a pattern are force-drawn in this color/shape/size with the label shown next to them &mdash; even if their category is normally filtered. First enabled match wins.</div></div>
+            <h3><span data-i18n="watchTitle">Watched</span> <span class="tag">&middot; <span data-i18n="watchSub">highlight + label by metadata</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="watchHint">Entities whose metadata contains a pattern are force-drawn in this color/shape/size with the label shown next to them &mdash; even if their category is normally filtered. First enabled match wins.</span></div></div>
             <div id="watchList"></div>
             <div class="mechrow">
               <div class="top">
-                <input class="mname" id="watchPattern" placeholder="metadata pattern (e.g. Strongbox)">
-                <input class="mname" id="watchLabel" placeholder="label (e.g. Strongbox)">
-                <button class="addbtn" id="watchAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+                <input class="mname" id="watchPattern" placeholder="metadata pattern (e.g. Strongbox)" data-i18n-ph="watchPh">
+                <input class="mname" id="watchLabel" placeholder="label (e.g. Strongbox)" data-i18n-ph="labelPh">
+                <button class="addbtn" id="watchAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
               </div>
             </div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Hidden <span class="tag">&middot; cull from radar, list &amp; nav</span></h3>
-            <div class="row"><div class="rl hint-row">Entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed everywhere &mdash; overlay, entity list, and navigation.</div></div>
+            <h3><span data-i18n="hideTitle">Hidden</span> <span class="tag">&middot; <span data-i18n="hideSub">cull from radar, list &amp; nav</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="hideHint">Entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed everywhere &mdash; overlay, entity list, and navigation.</span></div></div>
             <div id="hideList" class="controls" style="margin:8px 0 14px"></div>
             <div class="controls" style="margin:0">
-              <input type="search" id="hidePattern" placeholder="pattern or glob to hide (e.g. AbyssCrack, *Daemon*)">
-              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px">+ Hide</button>
+              <input type="search" id="hidePattern" placeholder="pattern or glob to hide (e.g. AbyssCrack, *Daemon*)" data-i18n-ph="hidePh">
+              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnHide">+ Hide</button>
             </div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Auto-path patterns <span class="tag">&middot; auto-select nav targets on zone entry</span></h3>
-            <div class="row"><div class="rl hint-row">On entering a zone, every navigation target whose tile path / entity metadata contains one of these is auto-selected for path drawing (up to 8). Clear all to disable.</div></div>
+            <h3><span data-i18n="autoNavTitle">Auto-path patterns</span> <span class="tag">&middot; <span data-i18n="autoNavSub">auto-select nav targets on zone entry</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="autoNavHint">On entering a zone, every navigation target whose tile path / entity metadata contains one of these is auto-selected for path drawing (up to 8). Clear all to disable.</span></div></div>
             <div id="autoNavList" class="controls" style="margin:8px 0 12px"></div>
             <div class="controls" style="margin:0 0 12px">
-              <input type="search" id="autoNavPattern" placeholder="pattern (e.g. Waypoint)">
-              <button class="addbtn" id="autoNavAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+              <input type="search" id="autoNavPattern" placeholder="pattern (e.g. Waypoint)" data-i18n-ph="autoNavPh">
+              <button class="addbtn" id="autoNavAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
             </div>
-            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px">Suggestions &mdash; click to add:</div></div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px"><span data-i18n="suggText">Suggestions &mdash; click to add:</span></div></div>
             <div class="controls" id="autoNavSuggest" style="margin:0"></div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Landmark tiles <span class="tag">&middot; surface terrain tiles as map markers (shown anywhere)</span></h3>
-            <div class="row"><div class="rl hint-row">Terrain tiles whose path contains a pattern are surfaced as landmarks &mdash; visible regardless of where you are on the map (unlike entities, which only show in range). Optional label renames them; blank uses the tile's own name. Built-in features (bosses, waypoints, league mechanics) already show &mdash; add your own here.</div></div>
+            <h3><span data-i18n="lmTitle">Landmark tiles</span> <span class="tag">&middot; <span data-i18n="lmSub">surface terrain tiles as map markers (shown anywhere)</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="lmHint">Terrain tiles whose path contains a pattern are surfaced as landmarks &mdash; visible regardless of where you are on the map (unlike entities, which only show in range). Optional label renames them; blank uses the tile's own name. Built-in features (bosses, waypoints, league mechanics) already show &mdash; add your own here.</span></div></div>
             <div id="lmpatList"></div>
             <div class="mechrow">
               <div class="top">
-                <input class="mname" id="lmpatPattern" placeholder="tile-path pattern (e.g. Vendor, Sanctum, Waygate)">
-                <input class="mname" id="lmpatLabel" placeholder="label (optional)">
-                <button class="addbtn" id="lmpatAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+                <input class="mname" id="lmpatPattern" placeholder="tile-path pattern (e.g. Vendor, Sanctum, Waygate)" data-i18n-ph="lmPh">
+                <input class="mname" id="lmpatLabel" placeholder="label (optional)" data-i18n-ph="lmlabelPh">
+                <button class="addbtn" id="lmpatAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
               </div>
             </div>
-            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px">Suggestions &mdash; click to add:</div></div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px"><span data-i18n="suggText">Suggestions &mdash; click to add:</span></div></div>
             <div class="controls" id="lmpatSuggest" style="margin:0"></div>
           </div>
         </div>
-        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsgF">&#10003; saved to config</span></div>
+        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsgF">&#10003; <span data-i18n="savedMsg">saved to config</span></span></div>
       </section>
 
       <section class="view" data-view="settings" hidden>
         <div class="panel-grid">
           <div class="card">
-            <h3>Exibição do Radar</h3>
-            <div class="row"><div class="rl">Mostrar monstros<small>pontos inimigos no mapa</small></div>
+            <h3 data-i18n="dispRadar">Exibição do Radar</h3>
+            <div class="row"><div class="rl" data-i18n="showMon">Mostrar monstros<small data-i18n="showMonDesc">pontos inimigos no mapa</small></div>
               <label class="sw"><input type="checkbox" data-set="showMonsters"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Mostrar terreno<small>mapa de terreno andável</small></div>
+            <div class="row"><div class="rl" data-i18n="showTerr">Mostrar terreno<small data-i18n="showTerrDesc">mapa de terreno andável</small></div>
               <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Mostrar jogador<small>ponto azul marcando sua posição</small></div>
+            <div class="row"><div class="rl" data-i18n="showPl">Mostrar jogador<small data-i18n="showPlDesc">ponto azul marcando sua posição</small></div>
               <label class="sw"><input type="checkbox" data-set="showPlayerBlip"><span class="track"></span><span class="knob"></span></label></div>
             <label class="row" style="cursor:pointer">
               <span class="rl" data-i18n="streamerMode">Modo Streamer<small data-i18n="streamerDesc">Ocultar o nome e o level do seu personagem do radar para privacidade.</small></span>
@@ -407,95 +407,95 @@ internal static class DashboardHtml
                 <option value="en">English</option>
               </select>
             </label>
-            <div class="row"><div class="rl">Rotas de navegação<small>desenhar rotas A&#42; até os pontos</small></div>
+            <div class="row"><div class="rl" data-i18n="showPath">Rotas de navegação<small data-i18n="showPathDesc">desenhar rotas A&#42; até os pontos</small></div>
               <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Pontos Curados<small>nomes da comunidade (chefe / saídas)</small></div>
+            <div class="row"><div class="rl" data-i18n="useCurLm">Pontos Curados<small data-i18n="useCurLmDesc">nomes da comunidade (chefe / saídas)</small></div>
               <label class="sw"><input type="checkbox" data-set="useCuratedLandmarks"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Limite FPS (Overlay)<small>menor = menos carga; 60 é fluido (15&ndash;360)</small></div>
+            <div class="row"><div class="rl" data-i18n="fpsCap">Limite FPS (Overlay)<small data-i18n="fpsCapDesc">menor = menos carga; 60 é fluido (15&ndash;360)</small></div>
               <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
           </div>
           <div class="card">
-            <h3>Barras HP Monstros <span class="tag">&middot; por raridade</span></h3>
+            <h3><span data-i18n="hpTitle">Barras HP Monstros</span> <span class="tag">&middot; <span data-i18n="hpSub">por raridade</span></span></h3>
             <div class="hpgrid">
-              <span class="hph">Raridade</span><span class="hph">Mostrar</span><span class="hph">Larg.</span><span class="hph">Borda</span><span class="hph">Esp.</span>
-              <span class="hpr">Normal</span>
+              <span class="hph" data-i18n="hpRarity">Raridade</span><span class="hph" data-i18n="hpShow">Mostrar</span><span class="hph" data-i18n="hpWidth">Larg.</span><span class="hph" data-i18n="hpBorder">Borda</span><span class="hph" data-i18n="hpThick">Esp.</span>
+              <span class="hpr" data-i18n="hpNorm">Normal</span>
               <label class="sw"><input type="checkbox" data-set="hpBarNormal"><span class="track"></span><span class="knob"></span></label>
               <input class="numin" type="number" step="1" min="4" data-hp="widthNormal">
               <input type="color" class="i-color" data-hpcolor="borderColorNormal">
               <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderNormal">
-              <span class="hpr" style="color:var(--magic)">Magic</span>
+              <span class="hpr" style="color:var(--magic)" data-i18n="hpMag">Magic</span>
               <label class="sw"><input type="checkbox" data-set="hpBarMagic"><span class="track"></span><span class="knob"></span></label>
               <input class="numin" type="number" step="1" min="4" data-hp="widthMagic">
               <input type="color" class="i-color" data-hpcolor="borderColorMagic">
               <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderMagic">
-              <span class="hpr" style="color:var(--rare)">Rare</span>
+              <span class="hpr" style="color:var(--rare)" data-i18n="hpRare">Rare</span>
               <label class="sw"><input type="checkbox" data-set="hpBarRare"><span class="track"></span><span class="knob"></span></label>
               <input class="numin" type="number" step="1" min="4" data-hp="widthRare">
               <input type="color" class="i-color" data-hpcolor="borderColorRare">
               <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderRare">
-              <span class="hpr" style="color:var(--unique)">Unique</span>
+              <span class="hpr" style="color:var(--unique)" data-i18n="hpUni">Unique</span>
               <label class="sw"><input type="checkbox" data-set="hpBarUnique"><span class="track"></span><span class="knob"></span></label>
               <input class="numin" type="number" step="1" min="4" data-hp="widthUnique">
               <input type="color" class="i-color" data-hpcolor="borderColorUnique">
               <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderUnique">
             </div>
             <div class="hpshared">
-              <label>Height<input class="numin" type="number" step="1" min="1" max="30" data-hp="height"></label>
-              <label>Offset X<input class="numin" type="number" step="1" data-hp="offsetX"></label>
-              <label>Offset Y<input class="numin" type="number" step="1" data-hp="offsetY"></label>
+              <label data-i18n="hpHeight">Height<input class="numin" type="number" step="1" min="1" max="30" data-hp="height"></label>
+              <label data-i18n="hpOffX" data-i18n="calOffX">Offset X<input class="numin" type="number" step="1" data-hp="offsetX"></label>
+              <label data-i18n="hpOffY" data-i18n="calOffY">Offset Y<input class="numin" type="number" step="1" data-hp="offsetY"></label>
             </div>
-            <div class="row"><div class="rl hint-row">Bar fill follows the monster icon color; set border color &amp; thickness per rarity (thickness 0 = no border). Offset Y negative = above the mob.</div></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="hpHint">Bar fill follows the monster icon color; set border color &amp; thickness per rarity (thickness 0 = no border). Offset Y negative = above the mob.</span></div></div>
           </div>
           <div class="card">
-            <h3>Terrain <span class="tag">&middot; walkable overlay</span></h3>
-            <div class="row"><div class="rl">Interior fill<small>wash over walkable cells</small></div>
+            <h3><span data-i18n="terrTitle">Terrain</span> <span class="tag">&middot; <span data-i18n="terrSub">walkable overlay</span></span></h3>
+            <div class="row"><div class="rl" data-i18n="terrInt">Interior fill<small data-i18n="terrIntDesc">wash over walkable cells</small></div>
               <span class="trow-ctl">
                 <input type="color" class="i-color" data-tcolor="interiorColor">
                 <input type="range" class="op" min="0" max="100" data-topacity="interiorOpacity">
                 <span class="opv" data-topv="interiorOpacity">—</span></span></div>
-            <div class="row"><div class="rl" style="color:var(--poi)">Wall edge<small>outlines around rooms</small></div>
+            <div class="row"><div class="rl" style="color:var(--poi)" data-i18n="terrEdge">Wall edge<small data-i18n="terrEdgeDesc">outlines around rooms</small></div>
               <span class="trow-ctl">
                 <input type="color" class="i-color" data-tcolor="edgeColor">
                 <input type="range" class="op" min="0" max="100" data-topacity="edgeOpacity">
                 <span class="opv" data-topv="edgeOpacity">—</span></span></div>
-            <div class="row"><div class="rl hint-row">Edits rebuild the terrain bitmap; use &ldquo;Show terrain&rdquo; above to hide it entirely.</div></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="terrHint">Edits rebuild the terrain bitmap; use &ldquo;Show terrain&rdquo; above to hide it entirely.</span></div></div>
           </div>
           <div class="card">
-            <h3>Map Calibration</h3>
-            <div class="row"><div class="rl">Scale multiplier<small>projection scale of the map overlay</small></div>
+            <h3 data-i18n="calTitle">Map Calibration</h3>
+            <div class="row"><div class="rl" data-i18n="calScale">Scale multiplier<small data-i18n="calScaleDesc">projection scale of the map overlay</small></div>
               <input class="numin" type="number" step="0.01" data-set="scaleMul"></div>
-            <div class="row"><div class="rl">Offset X</div><input class="numin" type="number" step="1" data-set="offX"></div>
-            <div class="row"><div class="rl">Offset Y</div><input class="numin" type="number" step="1" data-set="offY"></div>
-            <div class="row"><div class="rl hint-row">Adjust here &mdash; changes apply live (no in-game hotkeys).</div></div>
+            <div class="row"><div class="rl" data-i18n="hpOffX" data-i18n="calOffX">Offset X</div><input class="numin" type="number" step="1" data-set="offX"></div>
+            <div class="row"><div class="rl" data-i18n="hpOffY" data-i18n="calOffY">Offset Y</div><input class="numin" type="number" step="1" data-set="offY"></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="calHint">Adjust here &mdash; changes apply live (no in-game hotkeys).</span></div></div>
           </div>
           <div class="card">
-            <h3>Auto-Poção</h3>
-            <div class="row"><div class="rl">Limite Vida %<small>usar poção abaixo dessa %</small></div>
+            <h3 data-i18n="flaskTitle">Auto-Poção</h3>
+            <div class="row"><div class="rl" data-i18n="flaskLife">Limite Vida %<small data-i18n="flaskLifeDesc">usar poção abaixo dessa %</small></div>
               <input class="numin" type="number" step="1" min="0" max="100" data-set="lifeThresholdPct"></div>
-            <div class="row"><div class="rl">Limite Mana %<small>usar poção abaixo dessa %</small></div>
+            <div class="row"><div class="rl" data-i18n="flaskMana">Limite Mana %<small data-i18n="flaskLifeDesc">usar poção abaixo dessa %</small></div>
               <input class="numin" type="number" step="1" min="0" max="100" data-set="manaThresholdPct"></div>
-            <div class="row"><div class="rl">Tecla Poção de Vida</div>
+            <div class="row"><div class="rl" data-i18n="flaskLifeKey">Tecla Poção de Vida</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="lifeKey"></div>
-            <div class="row"><div class="rl">Tecla Poção de Mana</div>
+            <div class="row"><div class="rl" data-i18n="flaskManaKey">Tecla Poção de Mana</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="manaKey"></div>
-            <div class="row"><div class="rl">Cooldown Vida<small>ms mínimo entre poções</small></div>
+            <div class="row"><div class="rl" data-i18n="flaskLifeCd">Cooldown Vida<small data-i18n="flaskManaCdDesc">ms mínimo entre poções</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="lifeCooldownMs"></div>
-            <div class="row"><div class="rl">Cooldown Mana<small>ms mínimo entre poções</small></div>
+            <div class="row"><div class="rl" data-i18n="flaskManaCd">Cooldown Mana<small data-i18n="flaskManaCdDesc">ms mínimo entre poções</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
-            <div class="row"><div class="rl hint-row">F8 alterna a auto-poção in-game. Status: <span id="flaskState">&mdash;</span></div></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="flaskHint">F8 alterna a auto-poção in-game. Status:</span> <span id="flaskState">&mdash;</span></div></div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Radar Icons <span class="tag">&middot; shape &middot; color &middot; opacity &middot; size</span></h3>
+            <h3><span data-i18n="iconTitle">Radar Icons</span> <span class="tag">&middot; <span data-i18n="iconSub">shape &middot; color &middot; opacity &middot; size</span></span></h3>
             <div id="iconStyles"></div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Mechanics <span class="tag">&middot; metadata-matched icon overrides</span></h3>
-            <div class="row"><div class="rl hint-row">When an entity's metadata contains any comma-separated match term &mdash; and it's one of the selected types &mdash; it draws this icon instead of its generic dot. First enabled match wins.</div></div>
+            <h3><span data-i18n="mechTitle">Mechanics</span> <span class="tag">&middot; <span data-i18n="mechSub">metadata-matched icon overrides</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="mechHint">When an entity's metadata contains any comma-separated match term &mdash; and it's one of the selected types &mdash; it draws this icon instead of its generic dot. First enabled match wins.</span></div></div>
             <div id="mechList"></div>
-            <button class="addbtn" id="mechAdd">+ Add mechanic</button>
+            <button class="addbtn" id="mechAdd" data-i18n="mechBtn">+ Add mechanic</button>
           </div>
         </div>
-        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsg">&#10003; saved to config</span></div>
+        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsg">&#10003; <span data-i18n="savedMsg">saved to config</span></span></div>
       </section>
 
     </main>
@@ -883,7 +883,7 @@ function lmpatRow(p){
   return `<div class="mechrow" data-p="${esc(p.pattern)}">
     <div class="top">
       <label class="sw"><input type="checkbox" class="lp-en"${p.enabled?' checked':''}><span class="track"></span><span class="knob"></span></label>
-      <input class="mname lp-label" value="${esc(p.label)}" placeholder="label (optional)">
+      <input class="mname lp-label" value="${esc(p.label)}" placeholder="label (optional)" data-i18n-ph="lmlabelPh">
       <button class="delbtn lp-del">Remove</button>
     </div>
     <div class="matchin" style="border:none;padding:0;color:var(--ink-faint)">matches tile path: <code>${esc(p.pattern)}</code></div>
@@ -974,8 +974,8 @@ function renderState(){
 
 // -- i18n and init --
 const dict = {
-  pt: { life:"Vida", mana:"Mana", shield:"Escudo", zone:"Zona", area:"Área", areaCode:"Cód. Área", areaLvl:"Ato / Nível da Área", activeTime:"Tempo Ativo", mapOpen:"Mapa aberto", autoFlask:"Auto-poção", streamerMode:"Modo Streamer", streamerDesc:"Ocultar o nome e o level do seu personagem do radar para privacidade.", language:"Idioma", langDesc:"Escolha o idioma do painel.", you:"Você", hidden:"Oculto", act:"Ato", areaLvlNum:"Área Lvl", yes:"sim", no:"não", on:"ligado", off:"desligado", inGame:"no jogo", menu:"cidade/menu" },
-  en: { life:"Life", mana:"Mana", shield:"Shield", zone:"Zone", area:"Area", areaCode:"Area Code", areaLvl:"Act / Area Level", activeTime:"Active Time", mapOpen:"Map Open", autoFlask:"Auto-Flask", streamerMode:"Streamer Mode", streamerDesc:"Hide your character name and level from the radar for privacy.", language:"Language", langDesc:"Choose the dashboard language.", you:"You", hidden:"Hidden", act:"Act", areaLvlNum:"Area Lvl", yes:"yes", no:"no", on:"on", off:"off", inGame:"in game", menu:"town/menu" }
+  pt: {"life": "Vida", "mana": "Mana", "shield": "Escudo", "zone": "Zona", "area": "Área", "areaCode": "Cód. Área", "areaLvl": "Ato / Nível da Área", "activeTime": "Tempo Ativo", "mapOpen": "Mapa aberto", "autoFlask": "Auto-poção", "streamerMode": "Modo Streamer", "streamerDesc": "Ocultar o nome e o level do seu personagem do radar para privacidade.", "language": "Idioma", "langDesc": "Escolha o idioma do painel.", "you": "Você", "hidden": "Oculto", "act": "Ato", "areaLvlNum": "Área Lvl", "yes": "sim", "no": "não", "on": "ligado", "off": "desligado", "inGame": "no jogo", "menu": "cidade/menu", "cEnt": "Entidades", "cPoi": "Pontos de Int.", "cMon": "Monstros", "cLm": "Pontos Ref.", "tabDash": "Painel", "tabFilters": "Filtros", "tabSettings": "Configurações", "navSearchPh": "buscar entidades, pontos, tiles…", "navAlive": "Apenas vivos", "navClear": "Limpar rotas", "kindAll": "Todos", "kindLmt": "Pontos Ref. & Terreno", "kindEnt": "Entidades", "navEmpty": "Nada para navegar aqui.", "watchTitle": "Observados", "watchSub": "destacar + nomear pelo metadata", "watchHint": "Entidades cujo metadata contém um padrão são forçadas a desenhar com essa cor/forma/tamanho com o rótulo ao lado — mesmo se a categoria for normalmente ocultada. O primeiro que combinar vence.", "btnAdd": "+ Adicionar", "btnHide": "+ Ocultar", "hideTitle": "Ocultos", "hideSub": "remover do radar, lista & navegação", "hideHint": "Entidades cujo metadata contém um padrão (ou globs */?) são removidas de todo lugar — overlay, lista de entidades e navegação.", "autoNavTitle": "Padrões Auto-rota", "autoNavSub": "auto-selecionar alvos de navegação na entrada da zona", "autoNavHint": "Ao entrar numa zona, todo alvo de navegação cujo caminho da tile / metadata da entidade contém um destes é auto-selecionado para desenhar a rota (até 8). Limpe tudo para desativar.", "suggText": "Sugestões — clique para adicionar:", "lmTitle": "Tiles de Pontos Ref.", "lmSub": "mostrar tiles de terreno como marcadores (visíveis em qualquer lugar)", "lmHint": "Tiles de terreno cujo caminho contém um padrão são exibidos como pontos de referência — visíveis independentemente de onde você esteja no mapa. O rótulo opcional os renomeia; em branco usa o próprio nome da tile.", "savedMsg": "✓ salvo nas configurações", "dispRadar": "Exibição do Radar", "showMon": "Mostrar monstros", "showMonDesc": "pontos inimigos no mapa", "showTerr": "Mostrar terreno", "showTerrDesc": "mapa de terreno andável", "showPl": "Mostrar jogador", "showPlDesc": "ponto azul marcando sua posição", "showPath": "Rotas de navegação", "showPathDesc": "desenhar rotas A* até os pontos", "useCurLm": "Pontos Curados", "useCurLmDesc": "nomes da comunidade (chefe / saídas)", "fpsCap": "Limite FPS (Overlay)", "fpsCapDesc": "menor = menos carga; 60 é fluido", "hpTitle": "Barras HP Monstros", "hpSub": "por raridade", "hpRarity": "Raridade", "hpShow": "Mostrar", "hpWidth": "Larg.", "hpBorder": "Borda", "hpThick": "Esp.", "hpNorm": "Normal", "hpMag": "Mágico", "hpRare": "Raro", "hpUni": "Único", "hpHeight": "Altura", "hpOffX": "Offset X", "hpOffY": "Offset Y", "hpHint": "Preenchimento segue a cor do ícone; defina cor da borda e espessura por raridade (0 = sem borda). Y negativo = acima do mob.", "terrTitle": "Terreno", "terrSub": "overlay andável", "terrInt": "Preenchimento", "terrIntDesc": "cor sobre as células andáveis", "terrEdge": "Borda da parede", "terrEdgeDesc": "contornos em volta das salas", "terrHint": "Edições reconstroem o bitmap; use 'Mostrar terreno' acima para ocultar.", "calTitle": "Calibração do Mapa", "calScale": "Multiplicador de escala", "calScaleDesc": "escala da projeção", "calOffX": "Offset X", "calOffY": "Offset Y", "calHint": "Ajuste aqui — mudanças aplicam na hora (sem atalhos in-game).", "flaskTitle": "Auto-Poção", "flaskLife": "Limite Vida %", "flaskLifeDesc": "usar poção abaixo dessa %", "flaskMana": "Limite Mana %", "flaskManaDesc": "usar poção abaixo dessa %", "flaskLifeKey": "Tecla Poção Vida", "flaskManaKey": "Tecla Poção Mana", "flaskLifeCd": "Cooldown Vida", "flaskLifeCdDesc": "ms mínimo entre poções", "flaskManaCd": "Cooldown Mana", "flaskManaCdDesc": "ms mínimo entre poções", "flaskHint": "F8 alterna a auto-poção in-game. Status:", "iconTitle": "Ícones do Radar", "iconSub": "forma · cor · opacidade · tamanho", "mechTitle": "Mecânicas", "mechSub": "sobrescrever ícones por metadata", "mechHint": "Quando o metadata contém algum termo (sep. por vírgula) — e é de um dos tipos sel. — desenha este ícone em vez do padrão. Primeiro ativado vence.", "mechBtn": "+ Adicionar mecânica", "censo": "Censo", "watchPh": "padrão metadata (ex: Strongbox)", "labelPh": "rótulo (ex: Baú)", "hidePh": "padrão/glob para ocultar (ex: AbyssCrack, *Daemon*)", "autoNavPh": "padrão (ex: Waypoint)", "lmPh": "padrão do tile (ex: Vendor, Sanctum)", "lmlabelPh": "rótulo (opcional)"},
+  en: {"life": "Life", "mana": "Mana", "shield": "Shield", "zone": "Zone", "area": "Area", "areaCode": "Area Code", "areaLvl": "Act / Area Level", "activeTime": "Active Time", "mapOpen": "Map Open", "autoFlask": "Auto-Flask", "streamerMode": "Streamer Mode", "streamerDesc": "Hide your character name and level from the radar for privacy.", "language": "Language", "langDesc": "Choose the dashboard language.", "you": "You", "hidden": "Hidden", "act": "Act", "areaLvlNum": "Area Lvl", "yes": "yes", "no": "no", "on": "on", "off": "off", "inGame": "in game", "menu": "town/menu", "cEnt": "Entities", "cPoi": "Points of Int.", "cMon": "Monsters", "cLm": "Landmarks", "tabDash": "Dashboard", "tabFilters": "Filters", "tabSettings": "Settings", "navSearchPh": "search entities, points, tiles…", "navAlive": "Alive only", "navClear": "Clear paths", "kindAll": "All", "kindLmt": "Landmarks & Terrain", "kindEnt": "Entities", "navEmpty": "Nothing to navigate here.", "watchTitle": "Watched", "watchSub": "highlight + label by metadata", "watchHint": "Entities whose metadata contains a pattern are force-drawn in this color/shape/size with the label shown next to them — even if their category is normally filtered. First enabled match wins.", "btnAdd": "+ Add", "btnHide": "+ Hide", "hideTitle": "Hidden", "hideSub": "cull from radar, list & nav", "hideHint": "Entities whose metadata contains a pattern (or matches a */? glob) are removed everywhere — overlay, entity list, and navigation.", "autoNavTitle": "Auto-path patterns", "autoNavSub": "auto-select nav targets on zone entry", "autoNavHint": "On entering a zone, every navigation target whose tile path / entity metadata contains one of these is auto-selected for path drawing (up to 8). Clear all to disable.", "suggText": "Suggestions — click to add:", "lmTitle": "Landmark tiles", "lmSub": "surface terrain tiles as map markers (shown anywhere)", "lmHint": "Terrain tiles whose path contains a pattern are surfaced as landmarks — visible regardless of where you are on the map (unlike entities, which only show in range). Optional label renames them; blank uses the tile's own name.", "savedMsg": "✓ saved to config", "dispRadar": "Radar Display", "showMon": "Show monsters", "showMonDesc": "enemy dots on the map", "showTerr": "Show terrain", "showTerrDesc": "walkable terrain map", "showPl": "Show player", "showPlDesc": "blue dot marking your position", "showPath": "Navigation paths", "showPathDesc": "draw A* paths to targets", "useCurLm": "Curated Landmarks", "useCurLmDesc": "community names (boss / exits)", "fpsCap": "FPS Cap (Overlay)", "fpsCapDesc": "lower = less load; 60 is fluid", "hpTitle": "Monster HP Bars", "hpSub": "by rarity", "hpRarity": "Rarity", "hpShow": "Show", "hpWidth": "Width", "hpBorder": "Border", "hpThick": "Thick.", "hpNorm": "Normal", "hpMag": "Magic", "hpRare": "Rare", "hpUni": "Unique", "hpHeight": "Height", "hpOffX": "Offset X", "hpOffY": "Offset Y", "hpHint": "Bar fill follows the monster icon color; set border color & thickness per rarity (thickness 0 = no border). Offset Y negative = above the mob.", "terrTitle": "Terrain", "terrSub": "walkable overlay", "terrInt": "Interior fill", "terrIntDesc": "wash over walkable cells", "terrEdge": "Wall edge", "terrEdgeDesc": "outlines around rooms", "terrHint": "Edits rebuild the terrain bitmap; use 'Show terrain' above to hide it entirely.", "calTitle": "Map Calibration", "calScale": "Scale multiplier", "calScaleDesc": "projection scale of the map overlay", "calOffX": "Offset X", "calOffY": "Offset Y", "calHint": "Adjust here — changes apply live (no in-game hotkeys).", "flaskTitle": "Auto-Flask", "flaskLife": "Life Threshold %", "flaskLifeDesc": "use flask below this %", "flaskMana": "Mana Threshold %", "flaskManaDesc": "use flask below this %", "flaskLifeKey": "Life Flask Key", "flaskManaKey": "Mana Flask Key", "flaskLifeCd": "Life Cooldown", "flaskLifeCdDesc": "min ms between flasks", "flaskManaCd": "Mana Cooldown", "flaskManaCdDesc": "min ms between flasks", "flaskHint": "F8 toggles auto-flask in-game. Status:", "iconTitle": "Radar Icons", "iconSub": "shape · color · opacity · size", "mechTitle": "Mechanics", "mechSub": "metadata-matched icon overrides", "mechHint": "When an entity's metadata contains any comma-separated match term — and it's one of the selected types — it draws this icon instead of its generic dot. First enabled match wins.", "mechBtn": "+ Add mechanic", "censo": "Census", "watchPh": "metadata pattern (e.g. Strongbox)", "labelPh": "label (e.g. Strongbox)", "hidePh": "pattern or glob to hide (e.g. AbyssCrack, *Daemon*)", "autoNavPh": "pattern (e.g. Waypoint)", "lmPh": "tile-path pattern (e.g. Vendor, Sanctum)", "lmlabelPh": "label (optional)"}
 };
 let i18n = dict.pt;
 
@@ -992,7 +992,23 @@ function applyTranslations() {
 
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const key = el.getAttribute('data-i18n');
-    if (i18n[key]) el.innerHTML = el.innerHTML.replace(/^[^<]+/, i18n[key]);
+    if (i18n[key]) {
+      // Use childNodes to replace text but preserve tags like <small>
+      let replaced = false;
+      for (const node of el.childNodes) {
+        if (node.nodeType === 3 && node.nodeValue.trim() !== '') {
+          node.nodeValue = i18n[key];
+          replaced = true;
+          break;
+        }
+      }
+      if(!replaced) el.innerHTML = el.innerHTML.replace(/^[^<]+/, i18n[key]);
+    }
+  });
+  
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    const key = el.getAttribute('data-i18n-ph');
+    if (i18n[key]) el.placeholder = i18n[key];
   });
 }
 
