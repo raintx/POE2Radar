@@ -61,6 +61,12 @@ if (HasFlag(args, "--rarity"))
 if (HasFlag(args, "--mods"))
     return RunMods(process, reader, TryGetIntArg(args, "--min") ?? 1, TryGetIntArg(args, "--max") ?? 12);
 
+if (HasFlag(args, "--item"))
+    return RunItem(process, reader, TryGetIntArg(args, "--max") ?? 6);
+
+if (HasFlag(args, "--groundlabels"))
+    return RunGroundLabels(process, reader, TryGetIntArg(args, "--delay") ?? 0);
+
 if (HasFlag(args, "--validate"))
     return RunValidate(process, reader, TryGetIntArg(args, "--n") ?? 6);
 
@@ -1043,6 +1049,428 @@ static int RunRarity(ProcessHandle process, MemoryReader reader)
         if (set.Count >= 3 && set.All(v => v is >= 0 and <= 6))
             Console.WriteLine($"  +0x{o:X3}: values {{{string.Join(",", set.OrderBy(x => x))}}}");
     return 0;
+}
+
+// ── Item: discover dropped-item identity (art path + unique name + rarity) ──────────────────
+// Walks for WorldItem entities on the ground, unwraps each to its inner item entity, lists the
+// item's components, and string-scans each component to surface the .dds ART PATH and the UNIQUE
+// NAME (the keys for poe.ninja/art-map price lookup). Nothing here is in the validated table yet —
+// this is the discovery pass. Run it with a dropped item nearby (ideally an identified unique).
+static int RunItem(ProcessHandle process, MemoryReader reader, int maxItems)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    if (head == 0) { Console.Error.WriteLine("no awake entities"); return 1; }
+
+    // Collect ground items: WorldItem containers (preferred) and any direct Metadata/Items entity.
+    var worldItems = new List<(nint addr, string meta)>();
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    while (queue.Count > 0 && visited.Count < 200000)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        var entity = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+        var meta = ReadEntityMetadata(reader, entity);
+        if (meta.IndexOf("WorldItem", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            meta.StartsWith("Metadata/Items", StringComparison.Ordinal))
+            worldItems.Add((entity, meta));
+    }
+
+    Console.WriteLine($"found {worldItems.Count} ground-item entity(ies); inspecting up to {maxItems}.\n");
+    var shown = 0;
+    foreach (var (wiAddr, wiMeta) in worldItems)
+    {
+        if (shown >= maxItems) break;
+        shown++;
+        Console.WriteLine($"════════ WorldItem #{shown}  0x{wiAddr:X}  {wiMeta}");
+        DumpComponentList(reader, wiAddr, "  ");
+
+        // Unwrap to the inner item entity. The WorldItem component holds a pointer to it; brute-scan
+        // the container entity + its WorldItem component for a pointer to a Metadata/Items entity.
+        var (item, foundWhere) = FindInnerItem(reader, wiAddr);
+        if (item == 0)
+        {
+            Console.WriteLine("  (no inner Metadata/Items entity found — container may BE the item)");
+            item = wiMeta.StartsWith("Metadata/Items", StringComparison.Ordinal) ? wiAddr : 0;
+        }
+        else Console.WriteLine($"  → inner item entity 0x{item:X}  (ptr found at {foundWhere})");
+        if (item == 0) { Console.WriteLine(); continue; }
+
+        var itemMeta = ReadEntityMetadata(reader, item);
+        Console.WriteLine($"  ITEM  0x{item:X}  {itemMeta}");
+        var comps = ListComponents(reader, item);
+        Console.WriteLine($"  components ({comps.Count}): {string.Join(", ", comps.Select(c => c.name))}");
+
+        // Direct rarity read (validated layout: ObjectMagicProperties+0x144; Mods component +0x94).
+        foreach (var (cn, ca) in comps)
+            if (cn is "ObjectMagicProperties" or "Mods")
+            {
+                reader.TryReadStruct<int>(ca + 0x144, out var r144);
+                reader.TryReadStruct<int>(ca + 0x94, out var r94);
+                Console.WriteLine($"    {cn} 0x{ca:X}  rarity@+0x144={r144}  rarity@+0x94={r94}");
+            }
+
+        // String-scan every component for the art path + unique name (pointer-to-wide-string).
+        Console.WriteLine("  --- string scan (component +offset → wide string) ---");
+        foreach (var (cn, ca) in comps)
+            ScanComponentStrings(reader, cn, ca, 0x300);
+        Console.WriteLine();
+    }
+    return 0;
+}
+
+// Brute-scan a container entity (and its WorldItem component if present) for a pointer to an entity
+// whose metadata starts with "Metadata/Items". Returns (itemAddr, "where") or (0, "").
+static (nint, string) FindInnerItem(MemoryReader reader, nint container)
+{
+    bool IsItemEntity(nint p)
+    {
+        if (!IsUserPtr(p)) return false;
+        if (SafePtr(reader, p + Poe2.Entity.EntityDetailsPtr) == 0) return false;
+        return ReadEntityMetadata(reader, p).StartsWith("Metadata/Items", StringComparison.Ordinal);
+    }
+
+    // 1) the WorldItem component, if any.
+    var wi = ResolveComponentAddr(reader, container, "WorldItem");
+    if (wi != 0)
+        for (var off = 0; off <= 0x80; off += 8)
+        {
+            var p = SafePtr(reader, wi + off);
+            if (IsItemEntity(p)) return (p, $"WorldItem+0x{off:X}");
+        }
+    // 2) anywhere in the container's first 0x100 bytes.
+    for (var off = 0; off <= 0x100; off += 8)
+    {
+        var p = SafePtr(reader, container + off);
+        if (IsItemEntity(p)) return (p, $"entity+0x{off:X}");
+    }
+    return (0, "");
+}
+
+static bool IsUserPtr(nint p) => (ulong)p > 0x10000 && (ulong)p < 0x7FFF_FFFF_0000;
+
+// All (name, address) components of an entity (mirrors ResolveComponentAddr's bucket walk).
+static List<(string name, nint addr)> ListComponents(MemoryReader reader, nint entity)
+{
+    var res = new List<(string, nint)>();
+    var details = SafePtr(reader, entity + Poe2.Entity.EntityDetailsPtr);
+    if (details == 0) return res;
+    var lookup = SafePtr(reader, details + Poe2.EntityDetails.ComponentLookUpPtr);
+    if (lookup == 0) return res;
+    if (!reader.TryReadStruct<POE2Radar.Core.Game.StdVector>(entity + Poe2.Entity.ComponentList, out var cl)) return res;
+    var compCount = ((long)cl.Last - (long)cl.First) / 8;
+    if (compCount is <= 0 or > 256) return res;
+    var bFirst = SafePtr(reader, lookup + Poe2.ComponentLookUp.NameAndIndexBucket);
+    if (!reader.TryReadStruct<nint>(lookup + Poe2.ComponentLookUp.NameAndIndexBucket + 8, out var bLast)) return res;
+    var entries = ((long)bLast - (long)bFirst) / Poe2.ComponentLookUp.EntryStride;
+    if (bFirst == 0 || entries is <= 0 or > 256) return res;
+    for (long i = 0; i < entries; i++)
+    {
+        var e = bFirst + (nint)(i * Poe2.ComponentLookUp.EntryStride);
+        if (!reader.TryReadStruct<int>(e + 8, out var index) || index < 0 || index >= compCount) continue;
+        var name = reader.ReadStringUtf8(SafePtr(reader, e), 40);
+        if (string.IsNullOrEmpty(name)) continue;
+        res.Add((name, SafePtr(reader, cl.First + (nint)(index * 8))));
+    }
+    return res;
+}
+
+static void DumpComponentList(MemoryReader reader, nint entity, string indent)
+{
+    var comps = ListComponents(reader, entity);
+    Console.WriteLine($"{indent}components ({comps.Count}): {string.Join(", ", comps.Select(c => c.name))}");
+}
+
+// Scan a component's first `span` bytes for 8-byte pointers leading to a readable wide string, and
+// print any that look like an art path / metadata path / human name — the price-lookup keys.
+static void ScanComponentStrings(MemoryReader reader, string compName, nint comp, int span)
+{
+    if (comp == 0) return;
+    for (var off = 0; off + 8 <= span; off += 8)
+    {
+        var p = SafePtr(reader, comp + off);
+        if (!IsUserPtr(p)) continue;
+        string s;
+        try { s = reader.ReadStringUtf16(p, 96); } catch { continue; }
+        if (!LooksInteresting(s)) continue;
+        Console.WriteLine($"    {compName}+0x{off:X3} → \"{s}\"");
+    }
+}
+
+// Accept art paths, metadata paths, .dds resources, and Title-Case display names (unique/base).
+static bool LooksInteresting(string s)
+{
+    if (s.Length is < 4 or > 96) return false;
+    var letters = 0; var printable = 0;
+    foreach (var c in s) { if (c is >= ' ' and <= '~') printable++; if (char.IsLetter(c)) letters++; }
+    if (printable != s.Length || letters < 3) return false;
+    if (s.Contains("Art/", StringComparison.OrdinalIgnoreCase) ||
+        s.EndsWith(".dds", StringComparison.OrdinalIgnoreCase) ||
+        s.StartsWith("Metadata/", StringComparison.Ordinal)) return true;
+    // Title-Case-ish display name: has a space and starts uppercase (e.g. "Pillar of the Caged God").
+    return s[0] is >= 'A' and <= 'Z' && s.Contains(' ');
+}
+
+// ── Ground labels: find the in-world loot-LABEL UI elements + the item "identified" flag ────
+// The loot label is a UiElement with its own screen rect (NOT the item's world position). It's
+// undiscovered for PoE2. Strategy: we know the dropped-item entity addresses, and each label element
+// references its item — so walk the UI tree from UiRoot and report any element whose struct contains a
+// pointer to a known item (→ that's the label, and the offset is the ItemOnGround link). Also dumps the
+// two items' Mods component bytes side-by-side so the IDENTIFIED flag (the byte that differs between an
+// identified and an unidentified unique) can be spotted. Run with ≥1 dropped item (ideally one of each).
+static int RunGroundLabels(ProcessHandle process, MemoryReader reader, int delaySec)
+{
+    if (delaySec > 0)
+    {
+        Console.WriteLine($"*** Switch to PoE2 NOW and keep it FOCUSED (loot labels only lay out while the game renders). Scanning in {delaySec}s... ***");
+        for (var t = delaySec; t > 0; t--) { Console.Write($"{t} "); System.Threading.Thread.Sleep(1000); }
+        Console.WriteLine("\nscanning…");
+    }
+    var (_, igs, ai, _) = ResolveChain(process, reader);
+    if (ai == 0 || igs == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    // 1) Known dropped items: container (WorldItem) + inner item entity, labeled by art basename + rarity.
+    var known = new Dictionary<nint, string>();   // addr (container OR inner) → label
+    var items = new List<(nint container, nint inner, string art, int rarity)>();
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    while (queue.Count > 0 && visited.Count < 200000)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        var entity = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+        if (!ReadEntityMetadata(reader, entity).Contains("WorldItem", StringComparison.Ordinal)) continue;
+
+        var wi = ResolveComponentAddr(reader, entity, "WorldItem");
+        var inner = wi == 0 ? 0 : SafePtr(reader, wi + Poe2.WorldItemComponent.ItemEntity);
+        string art = "?"; int rarity = -1;
+        if (inner != 0)
+        {
+            var ri = ResolveComponentAddr(reader, inner, "RenderItem");
+            if (ri != 0) art = ItemArtBasename(reader.ReadStringUtf16(SafePtr(reader, ri + Poe2.RenderItemComponent.ResourcePath), 128)) ?? "?";
+            var mc = ResolveComponentAddr(reader, inner, "Mods");
+            if (mc != 0 && reader.TryReadStruct<int>(mc + Poe2.ModsComponent.Rarity, out var r)) rarity = r;
+        }
+        items.Add((entity, inner, art, rarity));
+        known[entity] = $"{art}(container)";
+        if (inner != 0) known[inner] = $"{art}(item)";
+    }
+
+    Console.WriteLine($"dropped items: {items.Count}");
+    foreach (var (c, inner, art, rarity) in items)
+        Console.WriteLine($"  {art,-20} rarity={rarity}  container=0x{c:X}  item=0x{inner:X}");
+
+    // 2) Mods component byte dump (find the identified flag by diffing ID vs unID).
+    Console.WriteLine("\n=== Mods component bytes +0x80..+0x120 (diff ID vs unID for the 'identified' flag) ===");
+    foreach (var (_, inner, art, _) in items)
+    {
+        if (inner == 0) continue;
+        var mc = ResolveComponentAddr(reader, inner, "Mods");
+        if (mc == 0) { Console.WriteLine($"  {art}: no Mods component"); continue; }
+        Console.Write($"  {art,-20} ");
+        for (var off = 0x80; off < 0x120; off += 4)
+            if (reader.TryReadStruct<int>(mc + off, out var v)) Console.Write($"{off:X3}={v} ");
+        Console.WriteLine();
+    }
+
+    // 3) Walk the UI tree from UiRoot; report elements whose struct points at a known item.
+    var uiRoot = SafePtr(reader, igs + Poe2.InGameState.UiRoot);
+    Console.WriteLine($"\n=== UI tree scan from UiRoot 0x{uiRoot:X} for pointers to known items ===");
+    var uq = new Queue<(nint el, int depth)>(); uq.Enqueue((uiRoot, 0));
+    var uvis = new HashSet<nint>();
+    var scanned = 0; var hits = 0;
+    while (uq.Count > 0 && uvis.Count < 40000)
+    {
+        var (el, depth) = uq.Dequeue();
+        if (el == 0 || depth > 14 || !uvis.Add(el)) continue;
+        scanned++;
+
+        // Scan this element's struct for a pointer to a known item entity.
+        for (var off = 0; off <= 0x600; off += 8)
+        {
+            var q = SafePtr(reader, el + off);
+            if (q != 0 && known.TryGetValue(q, out var lbl))
+            {
+                hits++;
+                reader.TryReadStruct<float>(el + Poe2.UiElement.RelativePos, out var px);
+                reader.TryReadStruct<float>(el + Poe2.UiElement.RelativePos + 4, out var py);
+                reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var sw);
+                reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var sh);
+                reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags);
+                var parent = SafePtr(reader, el + 0xB8);
+                Console.WriteLine($"  HIT el=0x{el:X} +0x{off:X3}→{lbl}  relPos=({px:F0},{py:F0}) size=({sw:F0}x{sh:F0}) flags=0x{flags:X} parent=0x{parent:X} depth={depth}");
+            }
+        }
+
+        // enqueue children (Children StdVector: First @ +0x10, Last @ +0x18; 8-byte child ptrs)
+        var first = SafePtr(reader, el + Poe2.UiElement.Children);
+        if (!reader.TryReadStruct<nint>(el + Poe2.UiElement.ChildrenEnd, out var last)) continue;
+        if (first == 0) continue;
+        var n = ((long)last - first) / 8;
+        if (n is <= 0 or > 1024) continue;
+        for (long i = 0; i < n; i++)
+        {
+            var child = SafePtr(reader, first + (nint)(i * 8));
+            if (child != 0) uq.Enqueue((child, depth + 1));
+        }
+    }
+    Console.WriteLine($"\nscanned {scanned} UI elements, {hits} pointer hit(s).");
+
+    // 4) Heap scan: find every committed-memory location holding a pointer to a known item. The
+    // LabelOnGround struct's ItemOnGround field is one of these; its neighbors reveal the struct layout
+    // (incl. the Label UiElement pointer → screen rect).
+    var targets = new HashSet<long>();
+    foreach (var kv in known) targets.Add((long)kv.Key);
+    Console.WriteLine($"\n=== heap scan for {targets.Count} item pointer(s) ===");
+    var buf = new byte[1 << 20];
+    var occ = new List<(nint at, long val)>();
+    long scannedBytes = 0;
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+    {
+        for (long o = 0; o < regSize; o += buf.Length)
+        {
+            if (occ.Count >= 400) break;
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            scannedBytes += got;
+            for (var i = 0; i + 8 <= got; i += 8)
+            {
+                var v = BitConverter.ToInt64(buf, i);
+                if (targets.Contains(v)) occ.Add((regBase + (nint)(o + i), v));
+            }
+        }
+        if (occ.Count >= 400) break;
+    }
+    Console.WriteLine($"scanned {scannedBytes / (1024 * 1024)} MB, {occ.Count} occurrence(s).");
+
+    // 5) The LabelOnGround struct holds the ItemOnGround ptr next to a Label UiElement ptr. Print ONLY
+    //    occurrences that have a UiElement (self-ref *(p+0x08)==p) within a wide neighborhood — those are
+    //    the labels. Most other hits are plain entity-pointer arrays (no UiElement nearby).
+    bool IsUi(nint p) => p != 0 && SafePtr(reader, p + Poe2.UiElement.Self) == p;
+    Console.WriteLine("\n=== LabelOnGround candidates (item ptr with a UiElement neighbor) ===");
+    var labelHits = 0;
+    nint bestEl = 0, bestStruct = 0; float bestW = 0;
+    nint fallbackEl = 0, fallbackStruct = 0;
+    foreach (var (at, val) in occ)
+    {
+        // wide window: the Label element ptr may sit a few qwords from ItemOnGround.
+        var uiNeighbor = nint.Zero; var uiOff = 0;
+        for (var d = -0x40; d <= 0x80; d += 8)
+        {
+            var p = SafePtr(reader, at + d);
+            if (IsUi(p)) { uiNeighbor = p; uiOff = d; break; }
+        }
+        if (uiNeighbor == 0) continue;
+        labelHits++;
+        reader.TryReadStruct<float>(uiNeighbor + Poe2.UiElement.SizeW, out var sw);
+        reader.TryReadStruct<float>(uiNeighbor + Poe2.UiElement.SizeH, out var sh);
+        if (labelHits <= 16)
+            Console.WriteLine($"  LABEL struct @0x{at:X} ({known[(nint)val]}): Label UiElement @{(uiOff < 0 ? "-" : "+")}0x{Math.Abs(uiOff):X} = 0x{uiNeighbor:X}  size=({sw:F0}x{sh:F0})");
+        // Pick the widest text-line element (the item-name label) as the anchor for the vector search.
+        if (sw > bestW && sw is > 80 and < 1200 && sh is > 6 and < 40) { bestW = sw; bestEl = uiNeighbor; bestStruct = at + uiOff; }
+        if (bestEl == 0 && fallbackEl == 0) { fallbackEl = uiNeighbor; fallbackStruct = at + uiOff; } // any candidate, in case nothing is laid out (unfocused)
+    }
+    if (bestEl == 0) { bestEl = fallbackEl; bestStruct = fallbackStruct; }
+    Console.WriteLine($"{labelHits} label candidate(s). best name label = 0x{bestEl:X} (w={bestW:F0}), struct base = 0x{bestStruct:X}");
+    if (bestW == 0) Console.WriteLine("  (no laid-out text label found — PoE2 likely wasn't focused; re-run with --delay 8 and switch to the game.)");
+
+    // 6) Walk parents of the best label element; in each ancestor, look for a StdVector whose memory
+    //    contains pointers to our known items → that's LabelsOnGround inside ItemsOnGroundLabelElement.
+    if (bestEl != 0)
+    {
+        Console.WriteLine("\n=== parent walk → find LabelsOnGround vector + container ===");
+        var el = bestEl;
+        for (var lvl = 0; lvl < 10 && el != 0; lvl++)
+        {
+            var parent = SafePtr(reader, el + 0xB8);
+            reader.TryReadStruct<nint>(parent == 0 ? el : parent + Poe2.UiElement.Children, out var pcFirst);
+            reader.TryReadStruct<nint>(parent + Poe2.UiElement.ChildrenEnd, out var pcLast);
+            var childCount = (parent != 0 && pcLast > pcFirst) ? ((long)pcLast - pcFirst) / 8 : 0;
+            Console.WriteLine($"  lvl{lvl}: el=0x{el:X} parent=0x{parent:X} (children={childCount})");
+            if (parent == 0) break;
+
+            // Scan the parent struct for a StdVector. LabelsOnGround is a vector of POINTERS to wrapper
+            // structs, so for each slot we follow the pointer and check wrapper+0x40 (ItemOnGround) ∈ known.
+            for (var off = 0; off <= 0xC00; off += 8)
+            {
+                var first = SafePtr(reader, parent + off);
+                if (!ModIsPtr(first)) continue;
+                if (!reader.TryReadStruct<nint>(parent + off + 8, out var last)) continue;
+                var slots = ((long)last - first) / 8;
+                if (slots is <= 0 or > 4096) continue;
+                var matches = 0; long firstMatchSlot = -1;
+                for (long k = 0; k < slots && k < 512; k++)
+                {
+                    var wptr = SafePtr(reader, first + (nint)(k * 8));
+                    if (!ModIsPtr(wptr)) continue;
+                    var item = SafePtr(reader, wptr + 0x40);
+                    if (item != 0 && known.ContainsKey(item)) { matches++; if (firstMatchSlot < 0) firstMatchSlot = k; }
+                }
+                if (matches > 0)
+                    Console.WriteLine($"    ★ LabelsOnGround(ptr-vec) container=0x{parent:X} vec@+0x{off:X} First=0x{first:X} slots={slots} matches={matches} (1st@slot {firstMatchSlot})");
+            }
+            el = parent;
+        }
+    }
+
+    // 7) Definitive locator: heap-scan for a pointer EQUAL to the best wrapper struct base. That hit IS a
+    //    LabelsOnGround vector slot — dump around it to reveal the vector (First/Last) + the owner.
+    if (bestStruct != 0)
+    {
+        Console.WriteLine($"\n=== heap scan for pointer == wrapper base 0x{bestStruct:X} ===");
+        var wrapHits = new List<nint>();
+        foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+        {
+            for (long o = 0; o < regSize && wrapHits.Count < 40; o += buf.Length)
+            {
+                var want = (int)Math.Min(buf.Length, regSize - o);
+                if (reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want)) <= 0) continue;
+                for (var i = 0; i + 8 <= want; i += 8)
+                    if (BitConverter.ToInt64(buf, i) == (long)bestStruct) wrapHits.Add(regBase + (nint)(o + i));
+            }
+            if (wrapHits.Count >= 40) break;
+        }
+        Console.WriteLine($"{wrapHits.Count} reference(s) to the wrapper:");
+        foreach (var hit in wrapHits.Take(20))
+        {
+            // Is `hit` a vector slot? read the surrounding qwords; show neighbors + whether nearby is a StdVector header.
+            reader.TryReadStruct<nint>(hit - 0x0, out var v0);
+            Console.Write($"  @0x{hit:X}");
+            // Treat hit as possibly inside a slot array: look 0x18 back for a plausible vector header (First ≤ hit ≤ Last).
+            for (var b = 0; b <= 0x40; b += 8)
+            {
+                var f = SafePtr(reader, hit - b);          // candidate First
+                if (!reader.TryReadStruct<nint>(hit - b + 8, out var l)) continue;
+                if (ModIsPtr(f) && (long)l > (long)f && (long)hit >= (long)f && (long)hit < (long)l && ((long)l - (long)f) <= 0x8000)
+                { Console.Write($"  [vec First=0x{f:X} Last=0x{l:X} headerAt=hit-0x{b:X}]"); break; }
+            }
+            Console.WriteLine();
+        }
+    }
+    return 0;
+}
+
+static string? ItemArtBasename(string path)
+{
+    if (string.IsNullOrEmpty(path)) return null;
+    var slash = path.LastIndexOf('/'); var start = slash >= 0 ? slash + 1 : 0;
+    var dot = path.LastIndexOf('.'); var end = dot > start ? dot : path.Length;
+    return end > start ? path[start..end] : null;
 }
 
 // ── Mods: read the monster modifier id strings out of ObjectMagicProperties ────────────────
