@@ -40,6 +40,7 @@ public sealed class RadarApp : IDisposable
     private DateTime _worldAt = DateTime.MinValue;
     private List<Poe2Live.EntityDot> _entities = new();
     private IReadOnlyList<Poe2Live.Landmark> _landmarks = Array.Empty<Poe2Live.Landmark>();
+    private readonly List<Poe2Live.EntityDot> _filteredEntitiesBuffer = new(512);
     private Poe2Live.TerrainData? _terrain;
     private uint _areaHash;
     private nint _lastAreaInstance;
@@ -182,7 +183,15 @@ public sealed class RadarApp : IDisposable
                 // Drop user-hidden entities once, here — so the renderer, nav-target builder, and the
                 // published RadarState (HTTP API) all see the same filtered list. Cull by metadata.
                 if (_hidden.Count > 0)
-                    _entities = _entities.Where(e => !_hidden.IsHidden(e.Metadata)).ToList();
+                {
+                    _filteredEntitiesBuffer.Clear();
+                    foreach (var e in _entities)
+                    {
+                        if (!_hidden.IsHidden(e.Metadata))
+                            _filteredEntitiesBuffer.Add(e);
+                    }
+                    _entities = _filteredEntitiesBuffer;
+                }
                 // If the user edited the custom landmark patterns, drop the cached per-area scan so it
                 // rebuilds with the new patterns this tick (otherwise it only refreshes on zone change).
                 if (_landmarkPatterns.Generation != _landmarkGen)

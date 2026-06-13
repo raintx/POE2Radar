@@ -100,12 +100,14 @@ public sealed class ApiServer : IDisposable
         var q = ctx.Request.QueryString;
         var s = _state();
 
+        if (!path.StartsWith("/api/") && path != "/state" && path != "/health" && path != "/entities" && path != "/landmarks")
+        {
+            ServeStaticFile(ctx, path);
+            return;
+        }
+
         switch (path)
         {
-            case "/":
-                WriteHtml(ctx, DashboardHtml.Page);
-                break;
-
             case "/health":
                 Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, inGame = s.InGame }, Json));
                 break;
@@ -743,6 +745,53 @@ public sealed class ApiServer : IDisposable
         ctx.Response.ContentLength64 = bytes.Length;
         ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
         ctx.Response.OutputStream.Close();
+    }
+
+    private static void ServeStaticFile(HttpListenerContext ctx, string path)
+    {
+        if (path == "/") path = "/index.html";
+        
+        var baseDir = AppContext.BaseDirectory;
+        var webRoot = Path.Combine(baseDir, "WebRoot");
+        var filePath = Path.GetFullPath(Path.Combine(webRoot, path.TrimStart('/')));
+
+        // Prevent directory traversal
+        if (!filePath.StartsWith(webRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            TryWrite(ctx, 403, "Forbidden");
+            return;
+        }
+
+        if (File.Exists(filePath))
+        {
+            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+            var mime = ext switch {
+                ".html" => "text/html; charset=utf-8",
+                ".css" => "text/css",
+                ".js" => "application/javascript",
+                ".svg" => "image/svg+xml",
+                ".ico" => "image/x-icon",
+                ".json" => "application/json",
+                _ => "application/octet-stream"
+            };
+
+            try
+            {
+                var bytes = File.ReadAllBytes(filePath);
+                ctx.Response.ContentType = mime;
+                ctx.Response.ContentLength64 = bytes.Length;
+                ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            }
+            catch
+            {
+                TryWrite(ctx, 500, "Internal Server Error");
+            }
+        }
+        else
+        {
+            TryWrite(ctx, 404, "Not Found");
+        }
+        ctx.Response.Close();
     }
 
     private static void TryWrite(HttpListenerContext ctx, int status, string body)

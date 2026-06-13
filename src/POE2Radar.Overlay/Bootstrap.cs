@@ -10,7 +10,7 @@ namespace POE2Radar.Overlay;
 /// </summary>
 internal static class Bootstrap
 {
-    public static nint ResolveGameStateSlot(ProcessHandle process, MemoryReader reader)
+    public static nint ResolveGameStateSlot(ProcessHandle process, MemoryReader reader, bool quiet = false)
     {
         if (AobPatterns.GameStateRefs.Length == 0)
         {
@@ -18,7 +18,7 @@ internal static class Bootstrap
             return 0;
         }
 
-        Console.WriteLine("Scanning for GameState via 'Game States' AOB pattern...");
+        if (!quiet) Console.WriteLine("Scanning for GameState via 'Game States' AOB pattern...");
         foreach (var pattern in AobPatterns.GameStateRefs)
         {
             foreach (var slot in AobScanner.ScanForResolvedAddresses(process, reader, pattern).Distinct())
@@ -32,8 +32,11 @@ internal static class Bootstrap
             }
         }
 
-        Console.Error.WriteLine("Pattern matched but no slot resolved to an in-game chain.");
-        Console.Error.WriteLine("Make sure you're loaded into a zone (not at login / character select).");
+        if (!quiet)
+        {
+            Console.Error.WriteLine("Pattern matched but no slot resolved to an in-game chain.");
+            Console.Error.WriteLine("Make sure you're loaded into a zone (not at login / character select).");
+        }
         return 0;
     }
 }

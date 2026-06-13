@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -22,6 +23,9 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Web\default_watched.json" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="WebRoot\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

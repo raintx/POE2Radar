@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>POE2Radar — Painel</title>
+<!-- Self-contained: no external fonts/CDNs. Falls back to local system serif/mono fonts. -->
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="mark">
+      <h1>POE2RADAR</h1>
+    </div>
+    <div class="hgap"></div>
+    <div class="area-chip" id="areaChip">— <b>·</b></div>
+    <div class="conn" id="conn"><span class="dot"></span><span id="connTxt">offline</span></div>
+  </header>
+
+  <div class="body">
+    <aside>
+      <div class="char-box" id="charBox" hidden>
+        <span id="cbName">Você</span> <span class="arr">&gt;</span> <span id="cbClass">?</span> <span id="cbLvl" class="arr"></span>
+      </div>
+      <div class="vital">
+        <div class="vlabel"><span data-i18n="life">Vida</span><span class="num" id="hpNum">—</span></div>
+        <div class="bar hp"><i id="hpBar" style="width:0"></i></div>
+      </div>
+      <div class="vital">
+        <div class="vlabel"><span data-i18n="mana">Mana</span><span class="num" id="mpNum">—</span></div>
+        <div class="bar mana"><i id="mpBar" style="width:0"></i></div>
+      </div>
+      <div class="vital">
+        <div class="vlabel"><span data-i18n="shield">Escudo</span><span class="num" id="esNum">—</span></div>
+        <div class="bar es"><i id="esBar" style="width:0"></i></div>
+      </div>
+
+      <div class="sect" data-i18n="zone">Zona</div>
+      <div class="kv"><span data-i18n="area">Área</span><span id="kAreaName">—</span></div>
+      <div class="kv"><span data-i18n="areaCode">Cód. Área</span><span id="kArea">—</span></div>
+      <div class="kv"><span data-i18n="areaLvl">Ato / Nível da Área</span><span id="kAlvl">—</span></div>
+      <div class="kv"><span data-i18n="activeTime">Tempo Ativo</span><span id="kTime">—</span></div>
+      <div class="kv"><span data-i18n="mapOpen">Mapa aberto</span><span id="kMap">—</span></div>
+      <div class="kv"><span data-i18n="autoFlask">Auto-poção</span><span id="kFlask">—</span></div>
+      <div id="zoneNotes" class="znotes" hidden></div>
+
+      <div class="sect"><span data-i18n="censo">Censo</span></div>
+      <div class="tally">
+        <div class="t"><div class="n" id="cEnt">0</div><div class="l" data-i18n="cEnt">Entidades</div></div>
+        <div class="t"><div class="n" id="cPoi">0</div><div class="l" data-i18n="cPoi">Pontos de Int.</div></div>
+        <div class="t"><div class="n" id="cMon">0</div><div class="l" data-i18n="cMon">Monstros</div></div>
+        <div class="t"><div class="n" id="cLm">0</div><div class="l" data-i18n="cLm">Pontos Ref.</div></div>
+      </div>
+      <div style="height:24px"></div>
+    </aside>
+
+    <main>
+      <div class="tabs">
+        <button class="tab on" data-tab="dashboard" data-i18n="tabDash">Painel</button>
+        <button class="tab" data-tab="filters" data-i18n="tabFilters">Filtros</button>
+        <button class="tab" data-tab="settings" data-i18n="tabSettings">Configurações</button>
+      </div>
+
+      <section class="view" data-view="dashboard">
+        <div class="controls">
+          <input type="search" id="navSearch" placeholder="buscar entidades, pontos, tiles…" data-i18n-ph="navSearchPh" />
+          <button class="chip on" id="navAlive" data-i18n="navAlive">Apenas vivos</button>
+          <button class="chip" id="navClear" data-i18n="navClear">Limpar rotas</button>
+          <span style="color:var(--ink-faint);font-size:11px" id="navCount"></span>
+        </div>
+        <div class="controls" id="kindChips">
+          <button class="chip on" data-kind="all" data-i18n="kindAll">Todos</button>
+          <button class="chip" data-kind="landmarks" data-i18n="kindLmt">Pontos Ref. &amp; Terreno</button>
+          <button class="chip" data-kind="entities" data-i18n="kindEnt">Entidades</button>
+        </div>
+        <div id="navList"></div>
+        <div class="empty" id="navEmpty" hidden data-i18n="navEmpty">Nada para navegar aqui.</div>
+      </section>
+
+      <section class="view" data-view="filters" hidden>
+        <div class="panel-grid">
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="watchTitle">Watched</span> <span class="tag">&middot; <span data-i18n="watchSub">highlight + label by metadata</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="watchHint">Entities whose metadata contains a pattern are force-drawn in this color/shape/size with the label shown next to them &mdash; even if their category is normally filtered. First enabled match wins.</span></div></div>
+            <div id="watchList"></div>
+            <div class="mechrow">
+              <div class="top">
+                <input class="mname" id="watchPattern" placeholder="metadata pattern (e.g. Strongbox)" data-i18n-ph="watchPh">
+                <input class="mname" id="watchLabel" placeholder="label (e.g. Strongbox)" data-i18n-ph="labelPh">
+                <button class="addbtn" id="watchAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
+              </div>
+            </div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="hideTitle">Hidden</span> <span class="tag">&middot; <span data-i18n="hideSub">cull from radar, list &amp; nav</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="hideHint">Entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed everywhere &mdash; overlay, entity list, and navigation.</span></div></div>
+            <div id="hideList" class="controls" style="margin:8px 0 14px"></div>
+            <div class="controls" style="margin:0">
+              <input type="search" id="hidePattern" placeholder="pattern or glob to hide (e.g. AbyssCrack, *Daemon*)" data-i18n-ph="hidePh">
+              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnHide">+ Hide</button>
+            </div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="autoNavTitle">Auto-path patterns</span> <span class="tag">&middot; <span data-i18n="autoNavSub">auto-select nav targets on zone entry</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="autoNavHint">On entering a zone, every navigation target whose tile path / entity metadata contains one of these is auto-selected for path drawing (up to 8). Clear all to disable.</span></div></div>
+            <div id="autoNavList" class="controls" style="margin:8px 0 12px"></div>
+            <div class="controls" style="margin:0 0 12px">
+              <input type="search" id="autoNavPattern" placeholder="pattern (e.g. Waypoint)" data-i18n-ph="autoNavPh">
+              <button class="addbtn" id="autoNavAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
+            </div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px"><span data-i18n="suggText">Suggestions &mdash; click to add:</span></div></div>
+            <div class="controls" id="autoNavSuggest" style="margin:0"></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="lmTitle">Landmark tiles</span> <span class="tag">&middot; <span data-i18n="lmSub">surface terrain tiles as map markers (shown anywhere)</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="lmHint">Terrain tiles whose path contains a pattern are surfaced as landmarks &mdash; visible regardless of where you are on the map (unlike entities, which only show in range). Optional label renames them; blank uses the tile's own name. Built-in features (bosses, waypoints, league mechanics) already show &mdash; add your own here.</span></div></div>
+            <div id="lmpatList"></div>
+            <div class="mechrow">
+              <div class="top">
+                <input class="mname" id="lmpatPattern" placeholder="tile-path pattern (e.g. Vendor, Sanctum, Waygate)" data-i18n-ph="lmPh">
+                <input class="mname" id="lmpatLabel" placeholder="label (optional)" data-i18n-ph="lmlabelPh">
+                <button class="addbtn" id="lmpatAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Add</button>
+              </div>
+            </div>
+            <div class="row" style="padding-top:0"><div class="rl hint-row" style="margin-bottom:6px"><span data-i18n="suggText">Suggestions &mdash; click to add:</span></div></div>
+            <div class="controls" id="lmpatSuggest" style="margin:0"></div>
+          </div>
+        </div>
+        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsgF">&#10003; <span data-i18n="savedMsg">saved to config</span></span></div>
+      </section>
+
+      <section class="view" data-view="settings" hidden>
+        <div class="panel-grid">
+          <div class="card">
+            <h3 data-i18n="dispRadar">Exibição do Radar</h3>
+            <div class="row"><div class="rl" data-i18n="showMon">Mostrar monstros<small data-i18n="showMonDesc">pontos inimigos no mapa</small></div>
+              <label class="sw"><input type="checkbox" data-set="showMonsters"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl" data-i18n="showTerr">Mostrar terreno<small data-i18n="showTerrDesc">mapa de terreno andável</small></div>
+              <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl" data-i18n="showPl">Mostrar jogador<small data-i18n="showPlDesc">ponto azul marcando sua posição</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPlayerBlip"><span class="track"></span><span class="knob"></span></label></div>
+            <label class="row" style="cursor:pointer">
+              <span class="rl" data-i18n="streamerMode">Modo Streamer<small data-i18n="streamerDesc">Ocultar o nome e o level do seu personagem do radar para privacidade.</small></span>
+              <div class="sw"><input type="checkbox" id="setStreamer"><div class="track"></div><div class="knob"></div></div>
+            </label>
+            <label class="row" style="cursor:pointer">
+              <span class="rl" data-i18n="language">Idioma<small data-i18n="langDesc">Escolha o idioma do painel.</small></span>
+              <select id="setLang" style="background:#0c0a07;color:var(--ink);border:1px solid var(--line);border-radius:2px;padding:3px 6px;font-family:inherit;font-size:11px">
+                <option value="auto">Automático (Navegador)</option>
+                <option value="pt">Português (Brasil)</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <div class="row"><div class="rl" data-i18n="showPath">Rotas de navegação<small data-i18n="showPathDesc">desenhar rotas A&#42; até os pontos</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl" data-i18n="useCurLm">Pontos Curados<small data-i18n="useCurLmDesc">nomes da comunidade (chefe / saídas)</small></div>
+              <label class="sw"><input type="checkbox" data-set="useCuratedLandmarks"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl" data-i18n="fpsCap">Limite FPS (Overlay)<small data-i18n="fpsCapDesc">menor = menos carga; 60 é fluido (15&ndash;360)</small></div>
+              <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
+          </div>
+          <div class="card">
+            <h3><span data-i18n="hpTitle">Barras HP Monstros</span> <span class="tag">&middot; <span data-i18n="hpSub">por raridade</span></span></h3>
+            <div class="hpgrid">
+              <span class="hph" data-i18n="hpRarity">Raridade</span><span class="hph" data-i18n="hpShow">Mostrar</span><span class="hph" data-i18n="hpWidth">Larg.</span><span class="hph" data-i18n="hpBorder">Borda</span><span class="hph" data-i18n="hpThick">Esp.</span>
+              <span class="hpr" data-i18n="hpNorm">Normal</span>
+              <label class="sw"><input type="checkbox" data-set="hpBarNormal"><span class="track"></span><span class="knob"></span></label>
+              <input class="numin" type="number" step="1" min="4" data-hp="widthNormal">
+              <input type="color" class="i-color" data-hpcolor="borderColorNormal">
+              <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderNormal">
+              <span class="hpr" style="color:var(--magic)" data-i18n="hpMag">Magic</span>
+              <label class="sw"><input type="checkbox" data-set="hpBarMagic"><span class="track"></span><span class="knob"></span></label>
+              <input class="numin" type="number" step="1" min="4" data-hp="widthMagic">
+              <input type="color" class="i-color" data-hpcolor="borderColorMagic">
+              <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderMagic">
+              <span class="hpr" style="color:var(--rare)" data-i18n="hpRare">Rare</span>
+              <label class="sw"><input type="checkbox" data-set="hpBarRare"><span class="track"></span><span class="knob"></span></label>
+              <input class="numin" type="number" step="1" min="4" data-hp="widthRare">
+              <input type="color" class="i-color" data-hpcolor="borderColorRare">
+              <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderRare">
+              <span class="hpr" style="color:var(--unique)" data-i18n="hpUni">Unique</span>
+              <label class="sw"><input type="checkbox" data-set="hpBarUnique"><span class="track"></span><span class="knob"></span></label>
+              <input class="numin" type="number" step="1" min="4" data-hp="widthUnique">
+              <input type="color" class="i-color" data-hpcolor="borderColorUnique">
+              <input class="numin" type="number" step="0.5" min="0" max="20" data-hp="borderUnique">
+            </div>
+            <div class="hpshared">
+              <label data-i18n="hpHeight">Height<input class="numin" type="number" step="1" min="1" max="30" data-hp="height"></label>
+              <label data-i18n="hpOffX" data-i18n="calOffX">Offset X<input class="numin" type="number" step="1" data-hp="offsetX"></label>
+              <label data-i18n="hpOffY" data-i18n="calOffY">Offset Y<input class="numin" type="number" step="1" data-hp="offsetY"></label>
+            </div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="hpHint">Bar fill follows the monster icon color; set border color &amp; thickness per rarity (thickness 0 = no border). Offset Y negative = above the mob.</span></div></div>
+          </div>
+          <div class="card">
+            <h3><span data-i18n="terrTitle">Terrain</span> <span class="tag">&middot; <span data-i18n="terrSub">walkable overlay</span></span></h3>
+            <div class="row"><div class="rl" data-i18n="terrInt">Interior fill<small data-i18n="terrIntDesc">wash over walkable cells</small></div>
+              <span class="trow-ctl">
+                <input type="color" class="i-color" data-tcolor="interiorColor">
+                <input type="range" class="op" min="0" max="100" data-topacity="interiorOpacity">
+                <span class="opv" data-topv="interiorOpacity">—</span></span></div>
+            <div class="row"><div class="rl" style="color:var(--poi)" data-i18n="terrEdge">Wall edge<small data-i18n="terrEdgeDesc">outlines around rooms</small></div>
+              <span class="trow-ctl">
+                <input type="color" class="i-color" data-tcolor="edgeColor">
+                <input type="range" class="op" min="0" max="100" data-topacity="edgeOpacity">
+                <span class="opv" data-topv="edgeOpacity">—</span></span></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="terrHint">Edits rebuild the terrain bitmap; use &ldquo;Show terrain&rdquo; above to hide it entirely.</span></div></div>
+          </div>
+          <div class="card">
+            <h3 data-i18n="calTitle">Map Calibration</h3>
+            <div class="row"><div class="rl" data-i18n="calScale">Scale multiplier<small data-i18n="calScaleDesc">projection scale of the map overlay</small></div>
+              <input class="numin" type="number" step="0.01" data-set="scaleMul"></div>
+            <div class="row"><div class="rl" data-i18n="hpOffX" data-i18n="calOffX">Offset X</div><input class="numin" type="number" step="1" data-set="offX"></div>
+            <div class="row"><div class="rl" data-i18n="hpOffY" data-i18n="calOffY">Offset Y</div><input class="numin" type="number" step="1" data-set="offY"></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="calHint">Adjust here &mdash; changes apply live (no in-game hotkeys).</span></div></div>
+          </div>
+          <div class="card">
+            <h3 data-i18n="flaskTitle">Auto-Poção</h3>
+            <div class="row"><div class="rl" data-i18n="flaskLife">Limite Vida %<small data-i18n="flaskLifeDesc">usar poção abaixo dessa %</small></div>
+              <input class="numin" type="number" step="1" min="0" max="100" data-set="lifeThresholdPct"></div>
+            <div class="row"><div class="rl" data-i18n="flaskMana">Limite Mana %<small data-i18n="flaskLifeDesc">usar poção abaixo dessa %</small></div>
+              <input class="numin" type="number" step="1" min="0" max="100" data-set="manaThresholdPct"></div>
+            <div class="row"><div class="rl" data-i18n="flaskLifeKey">Tecla Poção de Vida</div>
+              <input class="numin keyin" type="text" maxlength="1" data-set="lifeKey"></div>
+            <div class="row"><div class="rl" data-i18n="flaskManaKey">Tecla Poção de Mana</div>
+              <input class="numin keyin" type="text" maxlength="1" data-set="manaKey"></div>
+            <div class="row"><div class="rl" data-i18n="flaskLifeCd">Cooldown Vida<small data-i18n="flaskManaCdDesc">ms mínimo entre poções</small></div>
+              <input class="numin" type="number" step="100" min="0" data-set="lifeCooldownMs"></div>
+            <div class="row"><div class="rl" data-i18n="flaskManaCd">Cooldown Mana<small data-i18n="flaskManaCdDesc">ms mínimo entre poções</small></div>
+              <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
+            <div class="row"><div class="rl hint-row"><span data-i18n="flaskHint">F8 alterna a auto-poção in-game. Status:</span> <span id="flaskState">&mdash;</span></div></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="iconTitle">Radar Icons</span> <span class="tag">&middot; <span data-i18n="iconSub">shape &middot; color &middot; opacity &middot; size</span></span></h3>
+            <div id="iconStyles"></div>
+          </div>
+          <div class="card" style="grid-column:1/-1">
+            <h3><span data-i18n="mechTitle">Mechanics</span> <span class="tag">&middot; <span data-i18n="mechSub">metadata-matched icon overrides</span></span></h3>
+            <div class="row"><div class="rl hint-row"><span data-i18n="mechHint">When an entity's metadata contains any comma-separated match term &mdash; and it's one of the selected types &mdash; it draws this icon instead of its generic dot. First enabled match wins.</span></div></div>
+            <div id="mechList"></div>
+            <button class="addbtn" id="mechAdd" data-i18n="mechBtn">+ Add mechanic</button>
+          </div>
+        </div>
+        <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsg">&#10003; <span data-i18n="savedMsg">saved to config</span></span></div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

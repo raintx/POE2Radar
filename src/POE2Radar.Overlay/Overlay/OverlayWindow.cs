@@ -45,7 +45,7 @@ public sealed class OverlayWindow : IDisposable
 
     private const uint WmTrayCallback = OverlayNative.WM_APP + 1;
     private const uint MenuExitId = 1;
-    private bool _trayAdded;
+
 
     private ID2D1Factory? _d2dFactory;
     private IDWriteFactory? _dwriteFactory;
@@ -87,52 +87,10 @@ public sealed class OverlayWindow : IDisposable
         _wndProcDelegate = WndProc;
         RegisterWindowClass();
         CreateOverlayHwnd();
-        AddTrayIcon();
         InitializeDirect2D();
     }
 
-    /// <summary>Add a system-tray icon so users have an obvious way to quit (right-click → Exit).</summary>
-    private void AddTrayIcon()
-    {
-        var nid = new OverlayNative.NOTIFYICONDATAW
-        {
-            cbSize           = (uint)Marshal.SizeOf<OverlayNative.NOTIFYICONDATAW>(),
-            hWnd             = _hwnd,
-            uID              = 1,
-            uFlags           = OverlayNative.NIF_MESSAGE | OverlayNative.NIF_ICON | OverlayNative.NIF_TIP,
-            uCallbackMessage = WmTrayCallback,
-            hIcon            = OverlayNative.LoadIconW(0, OverlayNative.IDI_APPLICATION),
-            szTip            = "POE2Radar — right-click to Exit",
-            szInfo           = "",
-            szInfoTitle      = "",
-        };
-        _trayAdded = OverlayNative.Shell_NotifyIconW(OverlayNative.NIM_ADD, ref nid);
-    }
 
-    private void RemoveTrayIcon()
-    {
-        if (!_trayAdded) return;
-        var nid = new OverlayNative.NOTIFYICONDATAW
-        {
-            cbSize = (uint)Marshal.SizeOf<OverlayNative.NOTIFYICONDATAW>(),
-            hWnd = _hwnd, uID = 1, szTip = "", szInfo = "", szInfoTitle = "",
-        };
-        OverlayNative.Shell_NotifyIconW(OverlayNative.NIM_DELETE, ref nid);
-        _trayAdded = false;
-    }
-
-    private void ShowTrayMenu()
-    {
-        var menu = OverlayNative.CreatePopupMenu();
-        if (menu == 0) return;
-        OverlayNative.AppendMenuW(menu, OverlayNative.MF_STRING, MenuExitId, "Exit POE2Radar");
-        OverlayNative.GetCursorPos(out var pt);
-        OverlayNative.SetForegroundWindow(_hwnd); // standard tray-menu idiom so it dismisses correctly
-        var cmd = OverlayNative.TrackPopupMenu(menu,
-            OverlayNative.TPM_RIGHTBUTTON | OverlayNative.TPM_RETURNCMD, pt.X, pt.Y, 0, _hwnd, 0);
-        OverlayNative.DestroyMenu(menu);
-        if (cmd == (int)MenuExitId) OverlayNative.PostQuitMessage(0);
-    }
 
     private unsafe void RegisterWindowClass()
     {
@@ -329,12 +287,6 @@ public sealed class OverlayWindow : IDisposable
 
     private nint WndProc(nint hwnd, uint msg, nuint wParam, nint lParam)
     {
-        if (msg == WmTrayCallback)
-        {
-            var ev = (uint)(lParam & 0xFFFF);
-            if (ev is OverlayNative.WM_RBUTTONUP or OverlayNative.WM_LBUTTONUP) ShowTrayMenu();
-            return 0;
-        }
         if (msg == OverlayNative.WM_LBUTTONDOWN)
         {
             // Only delivered while NOT click-through (cursor is over a clickable overlay region).
@@ -354,7 +306,6 @@ public sealed class OverlayWindow : IDisposable
 
     public void Dispose()
     {
-        RemoveTrayIcon();
         _renderTarget?.Dispose();
         _dwriteFactory?.Dispose();
         _d2dFactory?.Dispose();
