@@ -99,7 +99,15 @@ public sealed class OverlayRenderer : IDisposable
         {
             // Draw nothing unless PoE2 is the foreground window — so the overlay never shows
             // over other apps when you alt-tab. (The cleared frame above hides prior content.)
-            if (ctx.Active && ctx.InGame)
+            if (ctx.Active && ctx.InGame && ctx.AtlasOpen)
+            {
+                // The Atlas screen is open: draw the highlight rings + off-screen arrows and the F10 route,
+                // never the world radar/minimap (meaningless over the atlas).
+                DrawAtlasRoute(rt, ctx);                   // F10 route line + START/END markers (under the rings)
+                DrawAtlas(rt, ctx);                        // tracked-map rings + off-screen arrows
+                _legendRowRects.Clear();
+            }
+            else if (ctx.Active && ctx.InGame)
             {
                 DrawNameplates(rt, ctx);                   // world-space HP bars over hostile mobs
                 if (ctx.Map.IsVisible)
@@ -120,34 +128,157 @@ public sealed class OverlayRenderer : IDisposable
         _window.Present();
     }
 
+    /// <summary>The F10 atlas route: the shortest path (through the node connection graph) from the player's
+    /// current node to the picked destination. Each canvas-space (relPos) waypoint is projected with the same
+    /// atlas homography as the rings, then drawn as a connected polyline (dark underlay + bright cyan line for
+    /// contrast over the busy atlas), with a node dot at each hop, a green START disc and a gold GOAL ring.
+    /// Off-screen segments are simply clipped by Direct2D, so the route still reads when the destination has
+    /// been panned off-screen. Drawn UNDER the highlight rings.</summary>
+    private void DrawAtlasRoute(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        var start = ctx.AtlasStart; var end = ctx.AtlasEnd; var route = ctx.AtlasRoute;
+        if (start is null && end is null && (route is null || route.Count == 0)) return;
+        float h0 = ctx.AtlasScale, h1 = ctx.AtlasShearX, h2 = ctx.AtlasOffX,
+              h3 = ctx.AtlasShearY, h4 = ctx.AtlasScaleY, h5 = ctx.AtlasOffY,
+              h6 = ctx.AtlasPersX, h7 = ctx.AtlasPersY;
+        NumVec2 Proj(NumVec2 p) { var w = h6 * p.X + h7 * p.Y + 1f; if (MathF.Abs(w) < 1e-6f) w = 1f; return new NumVec2((h0 * p.X + h1 * p.Y + h2) / w, (h3 * p.X + h4 * p.Y + h5) / w); }
+
+        var dark = new Color4(0f, 0f, 0f, 0.6f);
+        var bright = new Color4(0.235f, 0.86f, 1f, 0.95f);   // cyan
+        var green = new Color4(0.43f, 0.91f, 0.53f, 1f);
+        var gold = new Color4(0.878f, 0.702f, 0.255f, 1f);
+
+        if (route is { Count: >= 2 })
+        {
+            // Graph polyline: dark underlay then bright line (cheap outline for contrast over the atlas), hop dots.
+            var pts = new NumVec2[route.Count];
+            for (var i = 0; i < route.Count; i++) pts[i] = Proj(route[i]);
+            _bStyle!.Color = dark; for (var i = 1; i < pts.Length; i++) rt.DrawLine(pts[i - 1], pts[i], _bStyle, 7f);
+            _bStyle.Color = bright; for (var i = 1; i < pts.Length; i++) rt.DrawLine(pts[i - 1], pts[i], _bStyle, 3.5f);
+            _bStyle.Color = bright; for (var i = 1; i < pts.Length - 1; i++) rt.DrawEllipse(new Ellipse(pts[i], 4f, 4f), _bStyle, 2f);
+        }
+        else if (start is { } sa && end is { } eb)
+        {
+            // No graph path between the two — draw a direct dashed-ish straight line so the link is still shown.
+            var a = Proj(sa); var b = Proj(eb);
+            _bStyle!.Color = dark; rt.DrawLine(a, b, _bStyle, 6f);
+            _bStyle.Color = gold; rt.DrawLine(a, b, _bStyle, 2.5f);
+        }
+
+        // START (green disc) + END (gold ring) markers — drawn whenever set, even before a path exists.
+        if (start is { } s) { var p = Proj(s); _bStyle!.Color = green; rt.DrawEllipse(new Ellipse(p, 8f, 8f), _bStyle, 3f); rt.DrawEllipse(new Ellipse(p, 3f, 3f), _bStyle, 2f); }
+        if (end is { } e) { var p = Proj(e); _bStyle!.Color = gold; rt.DrawEllipse(new Ellipse(p, 11f, 11f), _bStyle, 3f); rt.DrawEllipse(new Ellipse(p, 4f, 4f), _bStyle, 2f); }
+    }
+
     /// <summary>
-    /// World-space HP bars over Magic/Rare/Unique monsters, projected via the camera WorldToScreen
-    /// matrix. Drawn whether or not the big map is open (it's a heads-up combat overlay).
+    /// Atlas overlay: highlight atlas map nodes on the open Atlas screen. Each node's canvas-space
+    /// position (RelativePos) is projected to screen via the atlas transform. Tracked/arrowed maps draw a
+    /// ring in their rule colour; off-screen arrowed maps get an edge arrow pointing toward them.
+    /// </summary>
+    private void DrawAtlas(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (ctx.AtlasNodes is not { Count: > 0 } marks) return;
+        float W = ctx.WindowWidth, H = ctx.WindowHeight;
+        // Homography: w = h6·x + h7·y + 1; screen = (h0·x+h1·y+h2, h3·x+h4·y+h5) / w. (shear/persp 0 ⇒ affine)
+        float h0 = ctx.AtlasScale, h1 = ctx.AtlasShearX, h2 = ctx.AtlasOffX,
+              h3 = ctx.AtlasShearY, h4 = ctx.AtlasScaleY, h5 = ctx.AtlasOffY,
+              h6 = ctx.AtlasPersX, h7 = ctx.AtlasPersY;
+        float ccx = W * 0.5f, ccy = H * 0.5f;
+        foreach (var n in marks)
+        {
+            var w = h6 * n.X + h7 * n.Y + 1f;
+            if (MathF.Abs(w) < 1e-6f) continue;
+            var sx = (h0 * n.X + h1 * n.Y + h2) / w;
+            var sy = (h3 * n.X + h4 * n.Y + h5) / w;
+            var onScreen = sx >= 0 && sx <= W && sy >= 0 && sy <= H;
+            var col = string.IsNullOrEmpty(n.Color) ? new Color4(0.235f, 0.86f, 1f, 1f) : ParseColor(n.Color, 1f);
+
+            // OFF-SCREEN: if this map has the arrow rule, draw an edge arrow pointing toward it; else skip.
+            if (!onScreen)
+            {
+                if (n.Arrow) DrawAtlasArrow(rt, sx, sy, ccx, ccy, W, H, col, n.Label);
+                continue;
+            }
+
+            var c = new NumVec2(sx, sy);
+            if (n.Selected || n.Arrow)
+            {
+                // Tracked / arrowed map on-screen → ring in its rule's category colour.
+                _bStyle!.Color = col;
+                rt.DrawEllipse(new Ellipse(c, 18f, 18f), _bStyle, 3f);
+                rt.DrawEllipse(new Ellipse(c, 9f, 9f), _bStyle, 2f);
+            }
+            else if (n.IconType > 0) // DEBUG (AtlasDrawAll): content-tag element
+            {
+                _bStyle!.Color = new Color4(1f, 0.9f, 0.2f, 0.9f);
+                rt.DrawEllipse(new Ellipse(c, 7f, 7f), _bStyle, 2f);
+            }
+            else if (n.Visited)
+            {
+                _bStyle!.Color = new Color4(1f, 0.2f, 1f, 1f);
+                rt.DrawEllipse(new Ellipse(c, 16f, 16f), _bStyle, 3f);
+                rt.DrawEllipse(new Ellipse(c, 8f, 8f), _bStyle, 2f);
+            }
+            else
+            {
+                _bStyle!.Color = n.HasContent ? new Color4(1f, 0.62f, 0.26f, 0.95f)
+                               : new Color4(0.43f, 0.91f, 0.53f, 0.85f);
+                rt.DrawEllipse(new Ellipse(c, 11f, 11f), _bStyle, 2f);
+            }
+            var label = n.Label ?? (n.IconType > 0 ? n.IconType.ToString() : null);
+            if (label != null)
+                rt.DrawText(label, _tf!, new Rect(sx + 11f, sy - 9f, sx + 220f, sy + 11f), _bText!, DrawTextOptions.Clip);
+        }
+    }
+
+    /// <summary>Draw an edge arrow pointing from screen-centre toward an OFF-SCREEN atlas map (sx,sy), so
+    /// you can pan toward high-value maps you can't zoom out far enough to see. Clamped to a screen-edge
+    /// inset, coloured by the rule, labelled with the map/content.</summary>
+    private void DrawAtlasArrow(ID2D1RenderTarget rt, float sx, float sy, float cx, float cy, float W, float H, Color4 col, string? label)
+    {
+        float dx = sx - cx, dy = sy - cy;
+        float len = MathF.Sqrt(dx * dx + dy * dy); if (len < 1f) return;
+        float ux = dx / len, uy = dy / len;
+        const float margin = 46f;
+        float tX = MathF.Abs(ux) > 1e-4f ? (W * 0.5f - margin) / MathF.Abs(ux) : 1e9f;
+        float tY = MathF.Abs(uy) > 1e-4f ? (H * 0.5f - margin) / MathF.Abs(uy) : 1e9f;
+        float t = MathF.Min(tX, tY);
+        float ex = cx + ux * t, ey = cy + uy * t;     // point on the inset screen edge
+        float px = -uy, py = ux;                       // perpendicular
+        var tip = new NumVec2(ex + ux * 11f, ey + uy * 11f);
+        var bl = new NumVec2(ex - ux * 9f + px * 10f, ey - uy * 9f + py * 10f);
+        var br = new NumVec2(ex - ux * 9f - px * 10f, ey - uy * 9f - py * 10f);
+        _bStyle!.Color = col;
+        rt.DrawLine(tip, bl, _bStyle, 4f);
+        rt.DrawLine(tip, br, _bStyle, 4f);
+        rt.DrawLine(bl, br, _bStyle, 4f);              // close the arrowhead triangle
+        if (label != null)
+        {
+            float lx = ex - ux * 56f, ly = ey - uy * 18f;
+            rt.DrawText(label, _tf!, new Rect(lx - 95f, ly - 8f, lx + 95f, ly + 10f), _bText!, DrawTextOptions.Clip);
+        }
+    }
+
+    /// <summary>
+    /// World-space HP bars over monsters, projected via the camera WorldToScreen matrix. Drawn whether
+    /// or not the big map is open (it's a heads-up combat overlay). HP bars are a MONSTER-ONLY concept,
+    /// gated entirely by the per-rarity on/off toggles in Settings (HpBarNormal/Magic/Rare/Unique) — they
+    /// are NOT a display-rule concern. The resolved rule is still consulted for two things: it must not be
+    /// a Hide rule (no bars over hidden mobs), and the bar FILL follows the mob's dot color. Bar GEOMETRY
+    /// (width/border/offset) is per-rarity from HpBars.
     /// </summary>
     private void DrawNameplates(ID2D1RenderTarget rt, RenderContext ctx)
     {
-        if (ctx.CameraMatrix is not { } m) return;
+        if (ctx.CameraMatrix is not { } m || ctx.HpBarTargets is not { Count: > 0 } bars) return;
         float W = ctx.WindowWidth, H = ctx.WindowHeight;
         var hb = ctx.HpBars;
-        var st = ctx.Styles;
-        foreach (var e in ctx.Entities)
+        var bh = hb.Height;
+        // All the expensive per-entity decisions (rarity gate, rule resolve, colour parse) were done at
+        // world rate in RadarApp.BuildHpSpecs; here we only project the LIVE position (refreshed this frame
+        // so the bar tracks the moving mob) and fill. fill/border are pre-packed 0xAARRGGBB.
+        foreach (var t in bars)
         {
-            if (e.Category != Poe2Live.EntityCategory.Monster || !e.IsAlive || e.HpMax <= 0) continue;
-            if (e.IsFriendly) continue; // hostile monsters only — no bars over allied/minion mobs
-
-            // Per-rarity enable + width + border (weight/color); the bar *fill* color is the matching
-            // monster icon color so "rare = gold" stays a single setting (NonMonster → no bar).
-            var (showBar, bw, colorHex, borderW, borderHex) = e.Rarity switch
-            {
-                Poe2Live.Rarity.Normal => (ctx.HpBarNormal, hb.WidthNormal, st.MonsterNormal.Color, hb.BorderNormal, hb.BorderColorNormal),
-                Poe2Live.Rarity.Magic  => (ctx.HpBarMagic,  hb.WidthMagic,  st.MonsterMagic.Color,  hb.BorderMagic,  hb.BorderColorMagic),
-                Poe2Live.Rarity.Rare   => (ctx.HpBarRare,   hb.WidthRare,   st.MonsterRare.Color,   hb.BorderRare,   hb.BorderColorRare),
-                Poe2Live.Rarity.Unique => (ctx.HpBarUnique, hb.WidthUnique, st.MonsterUnique.Color, hb.BorderUnique, hb.BorderColorUnique),
-                _                      => (false, 0f, "#FFFFFF", 0f, "#FFFFFF"),
-            };
-            if (!showBar || bw <= 0f) continue;
-
-            var w = e.World;
+            var w = t.World;
             var cw = w.X*m[3] + w.Y*m[7] + w.Z*m[11] + m[15];
             if (cw <= 0.0001f) continue;
             var cx = w.X*m[0] + w.Y*m[4] + w.Z*m[8] + m[12];
@@ -156,22 +287,25 @@ public sealed class OverlayRenderer : IDisposable
             var sy = (0.5f - cy/cw/2f) * H;
             if (sx < 0 || sx > W || sy < 0 || sy > H) continue;
 
-            var bh = hb.Height;
+            var bw = t.Width;
             var bx = sx - bw / 2f + hb.OffsetX;
             var by = sy + hb.OffsetY; // OffsetY is relative to the mob (negative = above)
-            var frac = e.HpFraction;
-            var col = ParseColor(colorHex, 1f);
             var barRect = new Vortice.RawRectF(bx, by, bx + bw, by + bh);
             rt.FillRectangle(barRect, _bPanel!);
-            _bStyle!.Color = frac < 0.3f ? ColLowHp : col;
-            rt.FillRectangle(new Vortice.RawRectF(bx, by, bx + bw * frac, by + bh), _bStyle);
-            if (borderW > 0f) // per-rarity border: weight + color from config
+            _bStyle!.Color = t.Frac < 0.3f ? ColLowHp : ColorFromU(t.Fill);
+            rt.FillRectangle(new Vortice.RawRectF(bx, by, bx + bw * t.Frac, by + bh), _bStyle);
+            if (t.BorderWidth > 0f)
             {
-                _bStyle.Color = ParseColor(borderHex, 1f);
-                rt.DrawRectangle(barRect, _bStyle, borderW);
+                _bStyle.Color = ColorFromU(t.Border);
+                rt.DrawRectangle(barRect, _bStyle, t.BorderWidth);
             }
         }
     }
+
+    /// <summary>Unpack a 0xAARRGGBB color (precomputed in RadarApp.BuildHpSpecs) to a Color4 — no string
+    /// parse or allocation, runs per bar per frame.</summary>
+    private static Color4 ColorFromU(uint u)
+        => new(((u >> 16) & 0xFF) / 255f, ((u >> 8) & 0xFF) / 255f, (u & 0xFF) / 255f, ((u >> 24) & 0xFF) / 255f);
 
     /// <summary>
     /// Draw-only guidance routes rendered on the WORLD GROUND, shown when the big map is CLOSED.
@@ -280,9 +414,6 @@ public sealed class OverlayRenderer : IDisposable
         rt.Transform = prev;
     }
 
-    /// <summary>A resolved, ready-to-draw icon: library icon name, pixel size, and color.</summary>
-    private readonly record struct DrawStyle(string Shape, float Size, Color4 Color);
-
     /// <summary>Parse a <c>#RRGGBB</c> color + 0..1 opacity into a Color4 (falls back to opaque white).</summary>
     private static Color4 ParseColor(string hex, float opacity)
     {
@@ -295,77 +426,8 @@ public sealed class OverlayRenderer : IDisposable
         return new Color4(1f, 1f, 1f, a);
     }
 
-    private static DrawStyle ToDrawStyle(IconStyle s) => new(s.Shape, s.Size, ParseColor(s.Color, s.Opacity));
-
-    /// <summary>The basic "could be drawn at all" gate, independent of styling: not a corpse, not an
-    /// already-opened chest, and not a completed encounter whose minimap icon the game has faded (e.g.
-    /// a looted Expedition marker). Shared by <see cref="ResolveStyle"/>, the mechanic-override path,
-    /// and the watched-highlight path — so a finished mechanic clears from ALL of them at once.</summary>
-    private static bool IsDrawable(Poe2Live.EntityDot e)
-        => !(e.Category == Poe2Live.EntityCategory.Monster && !e.IsAlive)
-           && !(e.Category == Poe2Live.EntityCategory.Chest && e.Opened)
-           && !e.IconComplete;
-
     /// <summary>Clamp a 0..1 channel to a 0..255 byte (rounded).</summary>
     private static byte ToByte(float f) => (byte)Math.Clamp((int)MathF.Round(f * 255f), 0, 255);
-
-    /// <summary>
-    /// Resolve the icon an entity should draw with, or null to skip it. Order: corpses/used chests are
-    /// dropped first; then an enabled "mechanic" rule whose match substring is in the metadata wins
-    /// (force-drawn, overriding category/ShowMonsters suppression); otherwise the per-category /
-    /// per-rarity style applies, honoring each style's own Enabled flag.
-    /// </summary>
-    private static DrawStyle? ResolveStyle(RenderContext ctx, Poe2Live.EntityDot e)
-    {
-        // Never draw corpses or already-opened chests, even if a mechanic would otherwise match.
-        if (!IsDrawable(e)) return null;
-
-        var st = ctx.Styles;
-
-        // Mechanic overrides — first enabled match wins. Force-draws (e.g. a flagged Expedition marker
-        // shows even if its category would normally be filtered).
-        var catName = e.Category.ToString();
-        foreach (var mech in st.Mechanics)
-        {
-            if (!mech.Enabled || mech.Match.Count == 0) continue;
-            // Category gate: if the rule lists categories, the entity must be one of them. Empty = all.
-            if (mech.Categories.Count > 0 &&
-                !mech.Categories.Contains(catName, StringComparer.OrdinalIgnoreCase)) continue;
-            foreach (var key in mech.Match)
-            {
-                if (!string.IsNullOrEmpty(key) && e.Metadata.Contains(key, StringComparison.OrdinalIgnoreCase))
-                    return new DrawStyle(mech.Shape, mech.Size, ParseColor(mech.Color, mech.Opacity));
-            }
-        }
-
-        IconStyle style;
-        switch (e.Category)
-        {
-            case Poe2Live.EntityCategory.Monster:
-                if (!ctx.ShowMonsters) return null;
-                style = e.Rarity switch
-                {
-                    Poe2Live.Rarity.Unique => st.MonsterUnique,
-                    Poe2Live.Rarity.Rare   => st.MonsterRare,
-                    Poe2Live.Rarity.Magic  => st.MonsterMagic,
-                    _                      => st.MonsterNormal,
-                };
-                break;
-            case Poe2Live.EntityCategory.Player:     style = st.Player; break;
-            case Poe2Live.EntityCategory.Npc:        style = st.Npc; break;
-            case Poe2Live.EntityCategory.Chest:
-                if (e.Rarity == Poe2Live.Rarity.Unique) style = st.ChestUnique;
-                else if (e.Rarity == Poe2Live.Rarity.Rare) style = st.ChestRare;
-                else return null; // rare+ chests only
-                break;
-            case Poe2Live.EntityCategory.Transition: style = st.Transition; break;
-            default:
-                if (!e.Poi) return null; // Object/Other → only game-flagged POIs
-                style = st.Poi;
-                break;
-        }
-        return style.Enabled ? ToDrawStyle(style) : null;
-    }
 
     private void DrawMap(ID2D1RenderTarget rt, RenderContext ctx)
     {
@@ -400,42 +462,47 @@ public sealed class OverlayRenderer : IDisposable
             }
         }
 
-        // Entity dots. Props (Object/Other) and dead monsters are filtered out — they're the
-        // clutter; the API still serves them for troubleshooting. Game-flagged POIs (entities
-        // with a MinimapIcon component) always draw with a white ring, even if their category
-        // would otherwise be filtered (waypoints, checkpoints, shrines, …).
+        // Entity dots, decided by the UNIFIED display ruleset (single source of truth). Resolve picks
+        // the first enabled rule that matches the entity (top-down, explicit precedence); null or a
+        // Hide rule → not drawn; otherwise draw the rule's shape/color/size + optional label. (Junk is
+        // still a pre-filter in Phase 1; the API serves every entity regardless for troubleshooting.)
         foreach (var e in ctx.Entities)
         {
             if (ctx.HideJunk && JunkFilter.IsJunk(e.Metadata)) continue;
 
-            // A user "watched" rule force-draws the entity in its own color/shape/size and labels it —
-            // overriding the default category style, but still suppressing corpses / opened chests.
-            var watch = IsDrawable(e) ? ctx.WatchedMatch?.Invoke(e.Metadata) : null;
-            var ds = watch is { } w
-                ? new DrawStyle(w.Shape, w.Size, ParseColor(w.Color, 1f))
-                : ResolveStyle(ctx, e);
-            if (ds is not { } style) continue; // null = filtered out
+            var rule = ctx.Resolve?.Invoke(e);
+            if (rule is null || rule.Hide) continue;
 
             var p = Project(new NumVec2(e.Grid.X, e.Grid.Y), player, center, scale);
-            _bStyle!.Color = style.Color;
-            DrawIcon(rt, style.Shape, p, style.Size, _bStyle, filled: true);
-            if (watch is { Label.Length: > 0 } wl)
-                rt.DrawText(wl.Label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bStyle, DrawTextOptions.Clip);
+            _bStyle!.Color = ParseColor(rule.Color, rule.Opacity);
+            DrawIcon(rt, rule.Shape, p, rule.Size, _bStyle, filled: true);
+            if (!string.IsNullOrEmpty(rule.Label))
+                rt.DrawText(rule.Label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bStyle, DrawTextOptions.Clip);
         }
 
-        // Static tile landmarks (boss arena, treasure, …) — configured marker + label at the centroid.
+        // Static tile landmarks (boss arena, treasure, …). Each is styled by its matching "Tile"
+        // display rule (unified ruleset) when one applies — shape/color/size/label, or hidden; with no
+        // matching tile rule it falls back to the default Landmark style. The layer draws when the
+        // default style is enabled OR a tile resolver is wired (so tile rules work even if the default
+        // landmark icon is turned off).
         var lmStyle = ctx.Styles.Landmark;
-        if (lmStyle.Enabled)
+        if (lmStyle.Enabled || ctx.ResolveTile != null)
         {
-            var lmIcon = lmStyle.Shape;
-            var lmColor = ParseColor(lmStyle.Color, lmStyle.Opacity);
+            var defColor = ParseColor(lmStyle.Color, lmStyle.Opacity);
             foreach (var lm in ctx.Landmarks)
             {
+                var tr = ctx.ResolveTile?.Invoke(lm.Path);
+                if (tr is { Hide: true }) continue;                 // a tile rule hides this landmark
+                if (tr is null && !lmStyle.Enabled) continue;       // no rule + default layer off → skip
+                var shape = tr?.Shape ?? lmStyle.Shape;
+                var color = tr != null ? ParseColor(tr.Color, tr.Opacity) : defColor;
+                var size  = tr?.Size ?? lmStyle.Size;
                 var p = Project(new NumVec2(lm.Center.X, lm.Center.Y), player, center, scale);
-                _bStyle!.Color = lmColor;
-                DrawIcon(rt, lmIcon, p, lmStyle.Size, _bStyle, filled: true);
-                // Prefer the curated friendly label when enabled and present; else the derived name.
-                var label = ctx.UseCuratedLandmarks && lm.CuratedName is { } c ? c : lm.Name;
+                _bStyle!.Color = color;
+                DrawIcon(rt, shape, p, size, _bStyle, filled: true);
+                // Rule label wins; else curated friendly label (if enabled); else the derived name.
+                var label = tr?.Label is { Length: > 0 } rl ? rl
+                          : (ctx.UseCuratedLandmarks && lm.CuratedName is { } c ? c : lm.Name);
                 rt.DrawText(label, _tf!, new Rect(p.X + 7, p.Y - 7, p.X + 240, p.Y + 9), _bStyle, DrawTextOptions.Clip);
             }
         }

@@ -25,7 +25,13 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, string> _meta = new();
     private readonly Dictionary<nint, nint> _iconAddr = new();     // entity → MinimapIcon component (0 = none); game POI
     private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
+    private readonly Dictionary<nint, string[]> _mods = new();     // entity → affix mod ids (static per spawn; cached; empty = no mods)
     private readonly Dictionary<nint, uint> _idAt = new();         // entity address → last-seen std::map key id (recycle guard)
+    // Bounds the number of NEW (uncached) monster mod reads per Entities() pass so walking into a large
+    // pack can't stall the world tick. Cached monsters cost nothing; new ones fill over a few ticks.
+    private int _modReadBudget;
+    private const int ModReadBudgetPerPass = 16;
+    private readonly byte[] _modVecBuf = new byte[24]; // one StdVector (First/Last/End)
     private nint _entCacheKey;   // AreaInstance address the entity caches were built for
 
     // Reused across Entities() calls (tick thread only) to avoid per-tick allocations. The std::map
@@ -50,8 +56,13 @@ public sealed class Poe2Live
 
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, Vector3 World, EntityCategory Category, string Metadata,
-        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false)
+        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false,
+        IReadOnlyList<string>? Mods = null)
     {
+        /// <summary>The monster's affix mod ids (auras/buffs), never null. Empty for non-monsters,
+        /// unrolled monsters, or before the budgeted mod read has filled this entity in.</summary>
+        public IReadOnlyList<string> ModList => Mods ?? Array.Empty<string>();
+
         /// <summary>Monsters are "alive" only with positive HP; non-life entities are always shown.</summary>
         public bool IsAlive => HpMax <= 0 || HpCur > 0;
         public bool HasLife => HpMax > 0;
@@ -65,7 +76,14 @@ public sealed class Poe2Live
     /// <summary>A static tile-based landmark: a notable terrain feature and its grid centroid.
     /// <paramref name="CuratedName"/> is an optional curated friendly label (null when none matches);
     /// <paramref name="Name"/> is the derived-from-path fallback.</summary>
-    public readonly record struct Landmark(string Name, string Path, System.Numerics.Vector2 Center, int TileCount, string? CuratedName = null);
+    public readonly record struct Landmark(string Name, string Path, System.Numerics.Vector2 Center, int TileCount, string? CuratedName = null)
+    {
+        /// <summary>Stable per-CLUSTER identity for nav selection. A tile path can now yield several
+        /// landmarks (one per spatial cluster — e.g. each stair-up section of a multi-level dungeon),
+        /// so the path alone is ambiguous; qualify it with the integer centroid, which is stable per
+        /// area (tiles are static terrain).</summary>
+        public string Key => $"{Path}@{(int)Center.X},{(int)Center.Y}";
+    }
 
     public sealed record TerrainData(byte[] Walkable, int Width, int Height);
 
@@ -145,82 +163,106 @@ public sealed class Poe2Live
         return c != 0 && _reader.TryReadStruct<byte>(c + Poe2.PlayerComponent.Level, out var b) ? b : 0;
     }
 
-    /// <summary>Local character class (derived from Metadata path).</summary>
-    public string PlayerClass(nint localPlayer)
-    {
-        var metadata = ReadMetadata(localPlayer);
-        if (string.IsNullOrEmpty(metadata)) return "";
-        var parts = metadata.Split('/');
-        if (parts.Length >= 3)
-        {
-            var last = parts[^1];
-            if (last == "StrIntFourb") return "Druid";
-            
-            return parts[2] switch {
-                "Str" => "Warrior",
-                "Dex" => "Ranger",
-                "Int" => "Witch",
-                "DexInt" => "Monk",
-                "StrDex" => "Mercenary", // or Huntress
-                "StrInt" => "Sorceress",
-                var x => x
-            };
-        }
-        return metadata;
-    }
-
     /// <summary>Player grid position (from the Render component's world position ÷ grid ratio).</summary>
     public System.Numerics.Vector2? PlayerGrid(nint localPlayer) => EntityGrid(localPlayer);
 
-    public readonly record struct Vitals(int HpCur, int HpUnreserved, int ManaCur, int ManaUnreserved, int EsCur, int EsUnreserved)
+    public readonly record struct Vitals(int HpCur, int HpUnreserved, int ManaCur, int ManaUnreserved,
+        int EsCur, int EsUnreserved)
     {
         public float HpPct   => HpUnreserved   > 0 ? 100f * HpCur   / HpUnreserved   : 100f;
         public float ManaPct => ManaUnreserved > 0 ? 100f * ManaCur / ManaUnreserved : 100f;
+        // ES% is 100 when there is no ES pool (Max 0, or the offset couldn't be confirmed) so an
+        // "ES" / "Either" flask trigger never fires on a build that has no shield to restore.
         public float EsPct   => EsUnreserved   > 0 ? 100f * EsCur   / EsUnreserved   : 100f;
+        public bool  HasEs   => EsUnreserved > 0;
     }
 
     private nint _plLife, _plLifeFor;
 
     // Self-healing vital offsets. Components are resolved by NAME (robust across patches), but the
     // VitalStruct offsets WITHIN the Life component slide between patches (e.g. 2026-06-04: Health
-    // 0x1A8→0x1B0). We validate the configured offset against a live Life component once; if it
-    // doesn't read a valid pool, we scan the component for its VitalStructs (ascending order =
-    // Health, Mana, ES) and use those for the session — so a minor layout shift degrades gracefully
-    // (auto-flask + HP bars keep working) instead of silently reading 0. The same offsets back the
-    // monster HP reads (identical component layout). Logged loudly so the table still gets updated.
-    private int _healthOff = Poe2.Life.Health, _manaOff = Poe2.Life.Mana;
+    // 0x1A8→0x1B0, Mana 0x1F8→0x208, ES 0x230→0x248 — each by a different small amount). We validate
+    // each configured offset against a live Life component once; if it doesn't read a valid pool we
+    // re-anchor it (see ResolveVitalOffset) so a minor layout shift degrades gracefully (auto-flask +
+    // HP bars keep working) instead of silently reading 0. The same offsets back the monster HP reads
+    // (identical component layout). Logged loudly so the table still gets updated.
+    //
+    // Health and ES BOTH self-heal; Mana is best-effort (kept for the mana flask but never gated on).
+    // _esOffKnown gates the ES read: if ES can't be confirmed near its offset we suppress the read
+    // entirely (→ ES% reads 100 → the ES/Either trigger never fires) rather than risk reading a decoy
+    // and misfiring the flask.
+    private int _healthOff = Poe2.Life.Health, _manaOff = Poe2.Life.Mana, _esOff = Poe2.Life.EnergyShield;
+    private bool _esOffKnown = true;
     private bool _vitalOffsetsResolved;
+
+    // Stricter than VitalStruct.LooksValid: ReservedFraction is reservation in basis-points, so a real
+    // pool keeps it in [0, 10000]. The Life component is littered with decoy structs that pass the
+    // loose check but carry out-of-range/garbage ReservedFraction — this filters most of them out.
+    private static bool LooksLikeRealPool(in VitalStruct v)
+        => v.LooksValid() && v.ReservedFraction >= 0 && v.ReservedFraction <= 10000;
+
+    // Resolve one pool's offset within the Life component, healing small drift. Returns the configured
+    // offset if it still reads a valid pool (the normal case); otherwise searches a TIGHT window
+    // anchored on the configured offset and returns the valid pool nearest to it, or -1 if none. The
+    // window is deliberately narrow so the distant decoy VitalStructs (verified live to sit well away
+    // from each real pool) stay out of reach — we heal a slide, we don't hunt blindly.
+    private int ResolveVitalOffset(nint lifeComp, int configured)
+    {
+        if (_reader.TryReadStruct<VitalStruct>(lifeComp + configured, out var v) && v.LooksValid())
+            return configured;
+        int best = -1, bestDist = int.MaxValue;
+        for (var off = Math.Max(0x80, configured - 0x18); off <= configured + 0x30; off += 4)
+        {
+            if (_reader.TryReadStruct<VitalStruct>(lifeComp + off, out var c) && LooksLikeRealPool(c))
+            {
+                var d = Math.Abs(off - configured);
+                if (d < bestDist) { bestDist = d; best = off; }
+            }
+        }
+        return best;
+    }
 
     private void EnsureVitalOffsets(nint lifeComp)
     {
         if (_vitalOffsetsResolved || lifeComp == 0) return;
-        // Fast path: the configured Health offset already reads a valid pool — nothing to do (no scan).
-        if (_reader.TryReadStruct<VitalStruct>(lifeComp + Poe2.Life.Health, out var h) && h.LooksValid())
-        { _vitalOffsetsResolved = true; return; }
 
-        // Drifted (or not loaded yet): scan the component for valid VitalStructs. After a hit, jump
-        // past the struct's extent so the overlapping +4 false-positive isn't counted as a 2nd pool.
-        var found = new List<int>(4);
-        for (var off = 0x160; off <= 0x400 && found.Count < 4;)
+        // Health is safety-critical and reliably the FIRST valid pool, so it gets an extra fallback:
+        // if it won't anchor near its configured offset, take the first valid pool in the component.
+        var health = ResolveVitalOffset(lifeComp, Poe2.Life.Health);
+        if (health < 0)
         {
-            if (_reader.TryReadStruct<VitalStruct>(lifeComp + off, out var v) && v.LooksValid())
-            { found.Add(off); off += 0x34; }
-            else off += 4;
+            for (var off = 0x80; off <= 0x400; off += 4)
+                if (_reader.TryReadStruct<VitalStruct>(lifeComp + off, out var v) && LooksLikeRealPool(v)) { health = off; break; }
+            if (health < 0) return; // not in-game yet / unreadable — retry next call (don't latch)
         }
-        if (found.Count == 0) return; // not in-game yet / unreadable — retry next call (don't latch)
 
         _vitalOffsetsResolved = true;
-        // Relocate HEALTH ONLY. It's reliably the FIRST valid pool in the component, and it's the
-        // safety-critical flask. Mana is deliberately NOT auto-guessed: the component holds other
-        // valid-looking VitalStructs between Health and Mana (verified live — an ordinal "2nd pool =
-        // Mana" guess lands on the wrong one), and driving the mana flask off the wrong pool is worse
-        // than not firing it. If Mana's offset drifts it just reads 0 (→ mana% 100 → no misfire) until
-        // the table is updated. Health self-heals; mana degrades safely.
-        _healthOff = found[0];
+        _healthOff = health;
         if (_healthOff != Poe2.Life.Health)
             Console.WriteLine($"Poe2Live: Life Health offset appears to have drifted — auto-relocated " +
                 $"0x{Poe2.Life.Health:X}->0x{_healthOff:X} (life flask + HP bars keep working). Update " +
-                $"Poe2.Life + re-validate (Research --hp); mana flask needs the offset table updated.");
+                $"Poe2.Life + re-validate (Research --vitals).");
+
+        // ES self-heals the same way; if it can't be confirmed we suppress the read (safe: ES% → 100).
+        var es = ResolveVitalOffset(lifeComp, Poe2.Life.EnergyShield);
+        _esOffKnown = es >= 0;
+        if (es >= 0)
+        {
+            _esOff = es;
+            if (_esOff != Poe2.Life.EnergyShield)
+                Console.WriteLine($"Poe2Live: Life EnergyShield offset appears to have drifted — auto-relocated " +
+                    $"0x{Poe2.Life.EnergyShield:X}->0x{_esOff:X} (ES flask keeps working). Update Poe2.Life + re-validate (Research --vitals).");
+        }
+        else
+        {
+            Console.WriteLine($"Poe2Live: Life EnergyShield offset (0x{Poe2.Life.EnergyShield:X}) couldn't be confirmed — " +
+                "ES flask trigger suppressed (reads as full) until the table is updated (Research --vitals).");
+        }
+
+        // Mana: best-effort relocation only. The mana flask is never gated on a confident read — if it
+        // drifts past the window it keeps the configured offset (reads 0 → mana% 100 → no misfire).
+        var mana = ResolveVitalOffset(lifeComp, Poe2.Life.Mana);
+        if (mana >= 0) _manaOff = mana;
     }
 
     /// <summary>
@@ -236,7 +278,8 @@ public sealed class Poe2Live
         EnsureVitalOffsets(_plLife);
         if (!_reader.TryReadStruct<VitalStruct>(_plLife + _healthOff, out var hp) || hp.Max <= 0) return null;
         _reader.TryReadStruct<VitalStruct>(_plLife + _manaOff, out var mana);
-        _reader.TryReadStruct<VitalStruct>(_plLife + Poe2.Life.EnergyShield, out var es);
+        VitalStruct es = default; // suppressed (stays 0 → ES% 100) when the offset isn't confirmed
+        if (_esOffKnown) _reader.TryReadStruct<VitalStruct>(_plLife + _esOff, out es);
         return new Vitals(hp.Current, Unreserved(hp), mana.Current, Unreserved(mana), es.Current, Unreserved(es));
     }
 
@@ -256,7 +299,7 @@ public sealed class Poe2Live
         if (areaInstance != _entCacheKey)
         {
             _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear(); _chestAddr.Clear();
-            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _idAt.Clear();
+            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _mods.Clear(); _idAt.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -268,6 +311,7 @@ public sealed class Poe2Live
         var root = Ptr(head + Poe2.StdMapNode.Parent);
         _entQueue.Clear(); _entQueue.Enqueue(root);
         _entVisited.Clear();
+        _modReadBudget = ModReadBudgetPerPass;
         while (_entQueue.Count > 0 && _entVisited.Count < 200000)
         {
             var node = _entQueue.Dequeue();
@@ -305,10 +349,11 @@ public sealed class Poe2Live
             if (cat is EntityCategory.Monster or EntityCategory.Player) (hpCur, hpMax) = ReadHp(entity);
             if (cat is EntityCategory.Monster or EntityCategory.Chest) rarity = ReadRarity(entity);
             if (cat == EntityCategory.Chest) opened = ReadChestOpened(entity);
+            var mods = cat == EntityCategory.Monster ? ReadMods(entity) : null;
 
             var (poi, iconComplete) = ReadIcon(entity);
             dots.Add(new EntityDot(id, entity, g, wv, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax,
-                poi, ReadReaction(entity), rarity, opened, iconComplete));
+                poi, ReadReaction(entity), rarity, opened, iconComplete, mods));
         }
         return dots;
     }
@@ -319,7 +364,7 @@ public sealed class Poe2Live
     {
         _renderAddr.Remove(entity); _lifeAddr.Remove(entity); _posAddr.Remove(entity);
         _ompAddr.Remove(entity); _chestAddr.Remove(entity); _category.Remove(entity);
-        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity);
+        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity); _mods.Remove(entity);
     }
 
     /// <summary>
@@ -360,6 +405,70 @@ public sealed class Poe2Live
         return rarity;
     }
 
+    /// <summary>
+    /// The monster's affix mod ids (auras/buffs) from ObjectMagicProperties+Mods. Like rarity, mods are
+    /// fixed at spawn, so the result is cached per entity (even when empty) and read at most once. New
+    /// (uncached) reads are bounded by <see cref="_modReadBudget"/> per pass so a fresh pack fills over a
+    /// few world ticks rather than stalling one. Reads ONLY the rolled-affix vector (+0x168); the +0x150
+    /// rarity-placeholder filler (MonsterRare/Magic/Unique{N}) is intentionally excluded.
+    /// </summary>
+    private string[]? ReadMods(nint entity)
+    {
+        if (_mods.TryGetValue(entity, out var cached)) return cached.Length == 0 ? null : cached;
+        if (_modReadBudget <= 0) return null;                  // out of budget this pass — retry next tick (don't cache)
+
+        if (!_ompAddr.TryGetValue(entity, out var omp))
+        {
+            omp = ResolveComponent(entity, "ObjectMagicProperties");
+            _ompAddr[entity] = omp;
+        }
+        if (omp == 0) { _mods[entity] = Array.Empty<string>(); return null; }
+        _modReadBudget--;
+
+        // StdVector at omp+Mods: [First, Last, End]. Element stride ModElemStride; each element holds a
+        // record pointer at +ModRecordPtr; the record's +ModIdString is a UTF-16 mod-id string.
+        if (_reader.TryReadBytes(omp + Poe2.ObjectMagicProperties.Mods, _modVecBuf) < _modVecBuf.Length)
+            return null; // transient read failure — leave uncached, retry next tick
+        var first = (nint)BitConverter.ToInt64(_modVecBuf, 0);
+        var last = (nint)BitConverter.ToInt64(_modVecBuf, 8);
+        var len = (long)last - first;
+        const int stride = Poe2.ObjectMagicProperties.ModElemStride;
+        if (first == 0 || len <= 0 || len > 0x4000 || len % stride != 0)
+        {
+            _mods[entity] = Array.Empty<string>(); return null; // no/garbage affix vector — cache as empty
+        }
+        var n = (int)(len / stride);
+        if (n > 100) { _mods[entity] = Array.Empty<string>(); return null; }
+
+        var list = new List<string>(n);
+        for (var i = 0; i < n; i++)
+        {
+            var rec = Ptr(first + (nint)(i * stride + Poe2.ObjectMagicProperties.ModRecordPtr));
+            if (rec == 0) continue;
+            var idPtr = Poe2.ObjectMagicProperties.ModIdString == 0 ? rec : Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
+            if (idPtr == 0) continue;
+            var s = _reader.ReadStringUtf16(idPtr, 64);
+            if (LooksLikeModId(s) && !list.Contains(s)) list.Add(s);
+        }
+        var arr = list.Count == 0 ? Array.Empty<string>() : list.ToArray();
+        _mods[entity] = arr;
+        return arr.Length == 0 ? null : arr;
+    }
+
+    /// <summary>A GGG mod id is a non-trivial identifier: letters/digits/underscore only, has a letter.</summary>
+    private static bool LooksLikeModId(string s)
+    {
+        if (s.Length is < 3 or > 64) return false;
+        var hasLetter = false;
+        foreach (var c in s)
+        {
+            if (c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z')) { hasLetter = true; continue; }
+            if (c is (>= '0' and <= '9') or '_') continue;
+            return false;
+        }
+        return hasLetter;
+    }
+
     private byte ReadReaction(nint entity)
     {
         if (!_posAddr.TryGetValue(entity, out var pos))
@@ -395,9 +504,66 @@ public sealed class Poe2Live
     /// per-area scan cache rebuilds.</summary>
     public Func<string, string?>? CustomLandmarkMatch { get; set; }
 
+    /// <summary>Optional Overlay-supplied curated-label lookup: (areaCode, tilePath) → friendly label,
+    /// or null. Lets a user-editable overlay sit on top of the baked-in <see cref="CustomLandmarkData"/>
+    /// (the "Landmarks" tab). When unset, the baked data is used directly. Call <see cref="InvalidateLandmarks"/>
+    /// after edits so the per-area scan rebuilds.</summary>
+    public Func<string, string, string?>? CuratedLookup { get; set; }
+
+    /// <summary>Resolve a tile's curated label: the injected user overlay if wired, else the baked list.</summary>
+    private string? Curated(string areaCode, string tilePath)
+        => CuratedLookup is { } f ? f(areaCode, tilePath) : CustomLandmarkData.TryMatch(areaCode, tilePath);
+
+    /// <summary>Max gap (in TILES, Chebyshev) between cells still treated as one landmark cluster.
+    /// Larger merges nearby copies of a reusable tile into fewer markers; smaller splits them. Set by
+    /// the Overlay from <c>RadarSettings.LandmarkClusterGap</c>; call <see cref="InvalidateLandmarks"/>
+    /// after changing it so the per-area scan rebuilds. Clamped to a sane range when used.</summary>
+    public int LandmarkClusterGap { get; set; } = 2;
+
     /// <summary>Drop the cached per-area landmark scan so the next <see cref="Landmarks"/> call rebuilds
     /// it (e.g. after the user edits the custom landmark patterns from the dashboard).</summary>
     public void InvalidateLandmarks() => _landmarksKey = -1;
+
+    private List<string>? _tilePaths;
+    private nint _tilePathsKey = -1;
+
+    /// <summary>
+    /// All DISTINCT terrain-tile paths in the area (sorted), scanned once per area and cached. This is
+    /// the full vocabulary of tile names — what the dashboard's add-rule picker browses so a tile rule
+    /// can target any tile, not just the ones already surfaced as landmarks.
+    /// </summary>
+    public IReadOnlyList<string> TilePaths(nint areaInstance)
+    {
+        if (areaInstance == _tilePathsKey && _tilePaths is not null) return _tilePaths;
+        _tilePathsKey = areaInstance;
+        _tilePaths = ScanTilePaths(areaInstance);
+        return _tilePaths;
+    }
+
+    private List<string> ScanTilePaths(nint areaInstance)
+    {
+        var result = new List<string>();
+        var terrain = areaInstance + Poe2.AreaInstance.TerrainMetadata;
+        if (!_reader.TryReadStruct<long>(terrain + Poe2.Terrain.TotalTiles, out var tilesX) || tilesX <= 0) return result;
+        var first = Ptr(terrain + Poe2.Terrain.TileDetailsPtr);
+        if (!_reader.TryReadStruct<nint>(terrain + Poe2.Terrain.TileDetailsPtr + 8, out var last) || first == 0) return result;
+        var count = ((long)last - (long)first) / Poe2.TileStructureSize;
+        if (count is <= 0 or > 1_000_000) return result;
+
+        // Distinct by TgtFilePtr (one read per tile type — dozens, not per tile), collect the paths.
+        var seenPtr = new HashSet<nint>();
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        for (long i = 0; i < count; i++)
+        {
+            var tgt = Ptr(first + (nint)(i * Poe2.TileStructureSize) + Poe2.TileStructure.TgtFilePtr);
+            if (tgt == 0 || !seenPtr.Add(tgt)) continue;
+            var p = ReadStdWString(tgt + Poe2.TgtFileStruct.TgtPath);
+            if (!string.IsNullOrEmpty(p)) paths.Add(p);
+        }
+        result.AddRange(paths);
+        result.Sort(StringComparer.Ordinal);
+        return result;
+    }
 
     /// <summary>
     /// Static tile-based landmarks for the area (boss arenas, treasure, waypoints, mechanics…).
@@ -424,12 +590,14 @@ public sealed class Poe2Live
         var count = ((long)last - (long)first) / Poe2.TileStructureSize;
         if (count is <= 0 or > 1_000_000) return result;
 
-        // Accumulate sum-of-positions + count per interesting path. Cache path by TgtFilePtr so
-        // we read each distinct tile type's StdWString once (dozens), not once per tile (thousands).
+        // Collect each kept path's tile cells (in tile-index space) so we can CLUSTER them spatially
+        // rather than average every instance into one centroid. A reusable tile (e.g. a "stairs up"
+        // wall piece) recurs in several disjoint spots — multi-level dungeons have multiple stair-up /
+        // stair-down sections connecting layers — and averaging them lands a marker in the dead space
+        // between, pointing at nothing. Clustering yields one landmark per actual spot. Cache path by
+        // TgtFilePtr so we read each distinct tile type's StdWString once (dozens), not per tile.
         var pathCache = new Dictionary<nint, string?>();
-        var sumX = new Dictionary<string, double>();
-        var sumY = new Dictionary<string, double>();
-        var num = new Dictionary<string, int>();
+        var cellsByPath = new Dictionary<string, List<(int tx, int ty)>>();
 
         for (long i = 0; i < count; i++)
         {
@@ -439,50 +607,76 @@ public sealed class Poe2Live
             if (!pathCache.TryGetValue(tgtFile, out var path))
             {
                 var p = ReadStdWString(tgtFile + Poe2.TgtFileStruct.TgtPath);
-                // Surface a tile as a navigable landmark if the curated community list names it for
-                // this area, OR it matches the generic keyword filter (fallback for uncurated areas),
-                // OR it matches a user-defined custom landmark pattern (dashboard-editable). The curated
-                // list is the primary whitelist: it covers area transitions, vendors, NPCs, etc. whose
-                // tile paths carry none of the keywords.
-                var keep = CustomLandmarkData.TryMatch(areaCode, p) != null || IsInterestingLandmark(p)
+                // Surface a tile as a landmark ONLY if the curated community list names it for this area
+                // OR a user "Tile" display rule matches it (CustomLandmarkMatch). The old generic keyword
+                // sweep was removed — it surfaced decorative terrain (e.g. every "...Vault_Door..." tile)
+                // as noise; users now opt into any tile via Tile rules + the dashboard picker.
+                var keep = Curated(areaCode, p) != null
                            || CustomLandmarkMatch?.Invoke(p) != null;
                 path = keep ? p : null;
                 pathCache[tgtFile] = path;
             }
             if (path is null) continue;
-
-            var gx = (i % tilesX) * Poe2.Terrain.TileGridCells;
-            var gy = (i / tilesX) * Poe2.Terrain.TileGridCells;
-            sumX[path] = sumX.GetValueOrDefault(path) + gx;
-            sumY[path] = sumY.GetValueOrDefault(path) + gy;
-            num[path] = num.GetValueOrDefault(path) + 1;
+            (cellsByPath.TryGetValue(path, out var cells) ? cells : cellsByPath[path] = new())
+                .Add(((int)(i % tilesX), (int)(i / tilesX)));
         }
 
-        foreach (var (path, n) in num)
-            result.Add(new Landmark(LandmarkName(path), path,
-                new System.Numerics.Vector2((float)(sumX[path] / n), (float)(sumY[path] / n)), n,
-                // Curated label wins; else a non-empty user label; else null (derived name shows).
-                CustomLandmarkData.TryMatch(areaCode, path) ?? NonEmpty(CustomLandmarkMatch?.Invoke(path))));
+        var cell = Poe2.Terrain.TileGridCells;
+        foreach (var (path, cells) in cellsByPath)
+        {
+            var name = LandmarkName(path);
+            // Curated label wins; else a non-empty user label; else null (derived name shows). Same
+            // for every cluster of this path (they're the same feature type in different spots).
+            var curated = Curated(areaCode, path) ?? NonEmpty(CustomLandmarkMatch?.Invoke(path));
+            foreach (var cluster in ClusterTiles(cells, Math.Clamp(LandmarkClusterGap, 0, 64)))
+            {
+                double sx = 0, sy = 0;
+                foreach (var (tx, ty) in cluster) { sx += tx; sy += ty; }
+                var center = new System.Numerics.Vector2(
+                    (float)(sx / cluster.Count * cell), (float)(sy / cluster.Count * cell));
+                result.Add(new Landmark(name, path, center, cluster.Count, curated));
+            }
+        }
         return result;
+    }
+
+    /// <summary>
+    /// Group same-path tile cells into spatially-disjoint clusters: two cells join when within a
+    /// Chebyshev gap of <c>≤ gap</c> tiles (gap=2 bridges a one-tile hole inside a feature while
+    /// keeping well-separated copies apart; larger merges more, 0 = only directly-touching cells).
+    /// Plain BFS over a cell set — O(tiles) for the small kept-path counts, so a tile type that recurs
+    /// across the map yields one cluster per location instead of a single meaningless average.
+    /// </summary>
+    private static List<List<(int tx, int ty)>> ClusterTiles(List<(int tx, int ty)> cells, int gap)
+    {
+        var set = new HashSet<(int, int)>(cells);
+        var visited = new HashSet<(int, int)>();
+        var clusters = new List<List<(int tx, int ty)>>();
+        var queue = new Queue<(int, int)>();
+        foreach (var start in cells)
+        {
+            if (!visited.Add(start)) continue;
+            var cluster = new List<(int tx, int ty)>();
+            queue.Enqueue(start);
+            while (queue.Count > 0)
+            {
+                var (cx, cy) = queue.Dequeue();
+                cluster.Add((cx, cy));
+                for (var dx = -gap; dx <= gap; dx++)
+                    for (var dy = -gap; dy <= gap; dy++)
+                    {
+                        var nb = (cx + dx, cy + dy);
+                        if (set.Contains(nb) && visited.Add(nb)) queue.Enqueue(nb);
+                    }
+            }
+            clusters.Add(cluster);
+        }
+        return clusters;
     }
 
     /// <summary>Null for null/empty, else the string — so an empty user label means "surface but use the
     /// path-derived name" rather than showing a blank curated label.</summary>
     private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
-
-    private static bool IsInterestingLandmark(string p)
-    {
-        if (string.IsNullOrEmpty(p)) return false;
-        // "leagues" catches league-mechanic terrain features generically (their tile paths live under
-        // Metadata/Terrain/Leagues/<Mechanic>/…) — e.g. the Incursion Waygate device — so they surface
-        // as position-independent tile landmarks like any boss arena / waypoint. The named keywords
-        // cover the staple static features (and a few explicit league terms as belt-and-braces).
-        foreach (var kw in new[] { "arena", "boss", "treasure", "waypoint", "encounter", "ritual",
-                                   "vault", "reward", "unique", "checkpoint", "altar", "shrine",
-                                   "leagues", "waygate", "incursion", "expedition", "breach", "delirium" })
-            if (p.Contains(kw, StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
 
     private static string LandmarkName(string path)
     {
@@ -624,6 +818,21 @@ public sealed class Poe2Live
 
     // ── internals ───────────────────────────────────────────────────────────
 
+    /// <summary>RENDER-RATE live read of one already-known monster's world position + HP, reusing the
+    /// component addresses cached by the last <see cref="Entities"/> walk (no component re-resolve, no map
+    /// re-enumeration). This is what lets HP bars track a moving monster smoothly at the full frame rate
+    /// while the expensive entity enumeration stays at world rate. Two tiny reads (12-byte position, 8-byte
+    /// vital). Returns false if the entity isn't in the current area's cache or the position read fails.</summary>
+    public bool TryLiveBar(nint entity, out Vector3 world, out int hpCur, out int hpMax)
+    {
+        world = default; hpCur = 0; hpMax = 0;
+        if (!_renderAddr.TryGetValue(entity, out var render) || render == 0) return false;
+        if (!_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
+        if (_lifeAddr.TryGetValue(entity, out var life) && life != 0
+            && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
+        return true;
+    }
+
     private Vector3? EntityWorld(nint entity)
     {
         if (!_renderAddr.TryGetValue(entity, out var render))
@@ -639,12 +848,16 @@ public sealed class Poe2Live
     private System.Numerics.Vector2? EntityGrid(nint entity)
         => EntityWorld(entity) is { } w ? new System.Numerics.Vector2(w.X / Poe2.WorldToGridRatio, w.Y / Poe2.WorldToGridRatio) : null;
 
-    /// <summary>Chest opened state: Chest component +0x168 is 1 while closed/openable, 0 once opened.</summary>
+    /// <summary>Chest opened state. The 2026-06-06 patch INVERTED this flag: Chest +0x168 is now 0
+    /// while closed/openable and non-zero once opened/used (was the reverse). Validated live by diffing
+    /// one rare chest closed-vs-opened — only +0x168 flipped (0→1; loot/interaction pointers nulled).
+    /// A read failure returns not-opened (i.e. shows the chest): for chests, over-showing is far safer
+    /// than silently hiding a real one — which is exactly the bug this flip caused.</summary>
     private bool ReadChestOpened(nint entity)
     {
         if (!_chestAddr.TryGetValue(entity, out var c)) { c = ResolveComponent(entity, "Chest"); _chestAddr[entity] = c; }
         if (c == 0) return false;
-        return _reader.TryReadStruct<byte>(c + Poe2.ChestComponent.OpenState, out var b) && b == 0;
+        return _reader.TryReadStruct<byte>(c + Poe2.ChestComponent.OpenState, out var b) && b != 0;
     }
 
     /// <summary>WorldToScreen matrix (16 floats, row-major) from Camera@InGameState+0x368. Null if unavailable.</summary>
@@ -665,13 +878,16 @@ public sealed class Poe2Live
         _meta[entity] = meta;
         c = meta switch
         {
+            // NPCs FIRST: friendly NPCs (Alva, vendors…) live under "Metadata/Monsters/NPC/…", so the
+            // "/NPC/" check must precede "/Monsters/" or they'd be miscategorized as combat monsters
+            // (and a Unique-rarity NPC would draw the enemy unique star). "/NPC/" is the NPC marker.
+            _ when meta.Contains("/NPC/", StringComparison.Ordinal)         => EntityCategory.Npc,
             // Real combat monsters only — exclude on-death/aura effect carriers (MonsterMods),
             // player/ally summons, and invisible effect daemons. Those clutter the map and aren't
-            // fight targets. (Hostility via Positioned.Reaction is a future refinement.)
+            // fight targets. (Friendly/hostile is applied at draw time via Positioned.Reaction.)
             _ when meta.Contains("/Monsters/", StringComparison.Ordinal) && IsNonCombat(meta) => EntityCategory.Other,
             _ when meta.Contains("/Monsters/", StringComparison.Ordinal)   => EntityCategory.Monster,
             _ when meta.Contains("/Characters/", StringComparison.Ordinal)  => EntityCategory.Player,
-            _ when meta.Contains("/NPC/", StringComparison.Ordinal)         => EntityCategory.Npc,
             // Real chests only — exclude breakable props (urns/vases/pots/etc.) under /Chests/.
             _ when meta.Contains("/Chests", StringComparison.Ordinal) && IsBreakableProp(meta) => EntityCategory.Other,
             _ when meta.Contains("/Chests", StringComparison.Ordinal)       => EntityCategory.Chest,

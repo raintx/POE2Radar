@@ -11,7 +11,7 @@ namespace POE2Radar.Overlay;
 /// <see cref="MatchKey"/> (landmark path or entity metadata) is what auto-nav patterns match against;
 /// <see cref="Grid"/> is the A* goal cell.
 /// </summary>
-public readonly record struct NavTarget(string Id, string Name, NumVec2 Grid, string MatchKey, bool IsEntity);
+public readonly record struct NavTarget(string Id, string Name, NumVec2 Grid, string MatchKey, bool IsEntity, bool AutoPath = false);
 
 /// <summary>One legend row: a navigation target, the selection-order color slot it draws in (0..7, or
 /// -1 when unselected), and whether it is currently selected (its own A* route is drawn).</summary>
@@ -20,6 +20,16 @@ public readonly record struct LegendEntry(NavTarget Target, int ColorSlot, bool 
 /// <summary>One selected target's smoothed A* route: the selection-order color slot (0..7) used to pick
 /// its draw/legend color and the smoothed grid-cell waypoints. Empty <see cref="Points"/> = no path.</summary>
 public readonly record struct SelectedPath(int ColorSlot, IReadOnlyList<(int x, int y)> Points);
+
+/// <summary>A monster HP bar to draw, with everything expensive already decided at world rate: the style
+/// (width + packed 0xAARRGGBB fill/border colors) was resolved once when the entity set was built; only
+/// <see cref="World"/> + <see cref="Frac"/> are refreshed live every render frame (cheap per-entity reads)
+/// so the bar tracks the moving monster smoothly. The renderer just projects + fills.</summary>
+public readonly record struct HpBarTarget(Vector3 World, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
+
+/// <summary>One atlas node to highlight. <see cref="X"/>/<see cref="Y"/> are the node's canvas-space
+/// RelativePos; the renderer projects them to screen via the atlas transform (scale + offset).</summary>
+public readonly record struct AtlasMark(float X, float Y, bool Selected, bool HasContent, bool Visited, bool Unlocked, int Biome, int IconType, string? Label = null, string? Color = null, bool Arrow = false);
 
 /// <summary>What the PoE2 renderer needs each frame. Built fresh by <see cref="RadarApp"/>.</summary>
 public sealed record RenderContext(
@@ -40,6 +50,7 @@ public sealed record RenderContext(
     // Auto-flask status.
     float HpPct,
     float ManaPct,
+    float EsPct,
     string FlaskNote,
     // Area / character HUD.
     string AreaCode,
@@ -72,8 +83,33 @@ public sealed record RenderContext(
     // ── User-tweakable icon style table + HP-bar geometry (mirrored from RadarSettings). ──
     RadarStyles Styles,
     HpBarSettings HpBars,
+    // Monster HP bars: style decided at world rate, position/HP refreshed live each render frame so bars
+    // track moving mobs smoothly. Null/empty → none. Replaces the old per-frame resolve over all entities.
+    IReadOnlyList<HpBarTarget>? HpBarTargets,
     // Walkable-terrain bitmap colors/transparency (mirrored from RadarSettings).
     TerrainSettings TerrainStyle,
-    // User "watched" highlight matcher: metadata → the first enabled watch rule it matches (or null).
-    // Force-draws the matched entity in the rule's color/shape/size and draws its label. May be null.
-    Func<string, Web.WatchedEntry?>? WatchedMatch);
+    // ── Unified display-rule engine (Phase 1). Resolves an entity to the first matching display rule
+    // (or null → not drawn); the rule says hide or how to draw (shape/color/size/label). Replaces the
+    // watched/mechanic/category dot decision in DrawMap. Null only if not wired (defensive). ──
+    Func<Poe2Live.EntityDot, Web.DisplayRule?>? Resolve = null,
+    // Tile-landmark styling resolver (Phase 2b): given a tile path, the matching "Tile"-category rule
+    // (styling pass) or null. Lets a rule restyle/hide a surfaced landmark; null → default Landmark style.
+    Func<string, Web.DisplayRule?>? ResolveTile = null,
+    // ── Atlas overlay (takes precedence over the minimap/radar when the Atlas screen is open). ──
+    bool AtlasOpen = false,                       // the Atlas screen is open → draw atlas highlights + route, suppress radar
+    IReadOnlyList<AtlasMark>? AtlasNodes = null,   // tracked/arrowed nodes to highlight (canvas-space coords)
+    // Atlas canvas→screen homography coefficients (h0..h7; h8=1). Shear/persp 0 ⇒ plain affine.
+    float AtlasScale = 0.5f,   // h0
+    float AtlasScaleY = 0.5f,  // h4
+    float AtlasOffX = 0f,      // h2
+    float AtlasOffY = 0f,      // h5
+    float AtlasShearX = 0f,    // h1
+    float AtlasShearY = 0f,    // h3
+    float AtlasPersX = 0f,     // h6
+    float AtlasPersY = 0f,     // h7
+    // Atlas route (F10 workflow): START/END tiles in canvas-space (relPos), and the graph path between them.
+    // Projected with the same atlas homography as the marks. Start/End draw as markers even before a path
+    // exists; AtlasRoute (≥2 pts) is the graph polyline, else the renderer draws a straight START→END line.
+    NumVec2? AtlasStart = null,
+    NumVec2? AtlasEnd = null,
+    IReadOnlyList<NumVec2>? AtlasRoute = null);

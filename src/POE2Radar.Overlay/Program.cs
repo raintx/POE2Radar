@@ -41,6 +41,7 @@ var radarThread = new Thread(() =>
             if (slot != 0)
             {
                 Console.WriteLine("Radar running. Open the in-game map to see terrain + entities.");
+                Console.WriteLine("Atlas: open it in-game; rings are auto-positioned. F10 over a tile = inspect its map/content/biome.");
                 try
                 {
                     using var app = new RadarApp(process, reader, slot);

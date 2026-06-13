@@ -173,14 +173,26 @@ public static class Poe2
     {
         // ✓ validated live across 21 monsters (values 0 and 2 seen). Enum: 0=Normal,1=Magic,2=Rare,3=Unique.
         public const int Rarity = 0x144;
+
+        // ⚠ affix-mod vector (the rolled monster modifiers — auras/buffs like MonsterPhysicalDamageAura1).
+        // std::vector at +0x168; element stride 0x20, record pointer at element+0x8, mod-id UTF-16 string
+        // at record+0x0. Validated live 2026-06-11 across Magic/Rare/Unique (Research --mods); the seed
+        // matched what the brute-force discovery found on every monster. NOT yet ✓-tier — one patch's
+        // evidence — and patch-volatile, so the overlay reads it but Research --mods re-discovers on drift.
+        // (+0x150 is the rarity/tier PLACEHOLDER vector — MonsterRare/Magic/Unique{N} filler — not affixes.)
+        public const int Mods = 0x168;
+        public const int ModElemStride = 0x20;
+        public const int ModRecordPtr = 0x8;   // element + this → mod record pointer
+        public const int ModIdString = 0x0;    // record + this → UTF-16 mod id
     }
 
-    /// <summary>Chest component. ✓ OpenState validated live (closed/unopened = 1, opened/used = 0 at
-    /// +0x168 — re-confirmed 2026-06-03 against a magic unopened chest). The fork's extra sub-offsets
-    /// did NOT survive validation on our build.</summary>
+    /// <summary>Chest component. ✓ OpenState @ +0x168 — the offset is stable, but the 2026-06-06 patch
+    /// INVERTED its polarity: now 0 = closed/openable, non-zero = opened/used (was 1=closed/0=opened,
+    /// per the 2026-06-03 read). Re-validated live by diffing a rare chest closed-vs-opened (+0x168
+    /// flipped 0→1). The fork's extra sub-offsets did NOT survive validation on our build.</summary>
     public static class ChestComponent
     {
-        public const int OpenState       = 0x168; // ✓ 1 = closed/openable, 0 = opened/used
+        public const int OpenState       = 0x168; // ✓ 0 = closed/openable, non-zero = opened/used (polarity flipped 2026-06-06)
         // ⚠ INVALID on our build (live 2026-06-03, G3_3): 0x20/0x21/0x25 read 184/7/127 — identical
         // across a magic AND a normal chest, sitting inside pointer bytes (component header). The
         // fork's IDA offsets drifted; the real Locked/Large flags need rediscovery (--validate).
@@ -230,6 +242,12 @@ public static class Poe2
         // ✓ validated live: player (friendly) = 0x01, hostile MastodonBoss = 0x00.
         // GameHelper2 rule: IsFriendly = (Reaction & 0x7F) == 1.
         public const int Reaction = 0x1E0;
+
+        // ✓ validated live (presence buff on/off sweep, Research --presence): the presence
+        // area-of-effect scalar. Float, defaults to 1.0; a "+20% Presence AoE" buff drove it to
+        // 1.0 from a ~0.92 base (≈ √1.2 radius scaling), and it tracked the buff on→off→on with
+        // nothing else moving. Effective presence radius = base radius × this scalar.
+        public const int PresenceAoeScale = 0x2A0;
     }
 
     /// <summary>
@@ -289,14 +307,108 @@ public static class Poe2
         public const int Zoom         = 0x3A8; // ✓ float (0.5 live)
     }
 
-    /// <summary>UiElement base — ✓ validated live (GH2's offsets drifted: Self 0x30→0x8, Flags 0x1B8→0x180).</summary>
+    /// <summary>UiElement base — ✓ validated live (GH2's offsets drifted: Self 0x30→0x8, Flags 0x1B8→0x180).
+    /// Parent/Position/Size from the 2026-06-07 community offset dump (resources/additional offsets.txt);
+    /// Position + Size confirmed live on the atlas-node class (size = 40×40 icons, positions vary per node).</summary>
     public static class UiElement
     {
         public const int Self           = 0x08;  // ✓ self pointer
-        public const int Children       = 0x10;  // ✓ StdVector of child UiElement pointers
+        public const int Children       = 0x10;  // ✓ StdVector begin (child UiElement ptrs); End @ +0x18
+        public const int ChildrenEnd    = 0x18;  // ✓ StdVector end
+        public const int Parent         = 0xB8;  // (community) parent UiElement; true UI root = *(UiRoot+0xB8)
+        public const int RelativePos    = 0x118; // ✓ StdTuple2D<float> position relative to parent (varies per atlas node)
         public const int Flags          = 0x180; // ✓ uint; IsVisibleLocal = bit 0x0B (toggle-diff: 0x2EF1↔0x26F1)
         public const int FlagVisibleBit = 0x0B;  // ✓ visible bit (set when shown)
+        public const int SizeW          = 0x288; // ✓ float unscaled width  (atlas node = 40)
+        public const int SizeH          = 0x28C; // ✓ float unscaled height (atlas node = 40)
         // Full visibility is hierarchical: an element is shown iff its own bit 0x0B AND every
-        // ancestor's bit are set. Walk Parent up to UiRoot (Parent offset still TBD).
+        // ancestor's bit are set. Walk Parent (+0xB8) up to the root.
+    }
+
+    /// <summary>Atlas map-node UiElement (a subclass with its own vtable; ~1200+ instances live in the
+    /// open Atlas). Fields from the 2026-06-07 community dump; structurally confirmed live: biome
+    /// (+0x32E) spread 0..12, per-node positions (UiElement.RelativePos), 40×40 size, scale (+0x130) =
+    /// the atlas zoom. (+0x300 is a map-TYPE id shared by same-type nodes — NOT unique per node.)
+    ///
+    /// <para><b>PROJECTION (✓ live, pan + zoom):</b> a node's on-screen position is
+    /// <c>screen = (UIscale × zoom) × relPos + offset</c>, where relPos = +0x118 (read live; the game
+    /// rewrites it on PAN so pan is free), zoom = +0x130 (read live; ~0.85 max zoom-out → larger zoomed
+    /// in), UIscale = winH/1600, offset ≈ factor×½icon ≈ (15,13) @ 1080p/zoom-0.85. NOT a perspective
+    /// homography. The overlay derives the WHOLE projection live from the window height + live zoom
+    /// (RadarApp.AtlasProjection) — resolution-correct with no calibration. <b>Recovery after a patch:</b> run
+    /// <c>POE2Radar.Research --atlas-probe</c> (Atlas map open) — it re-locates the class + canvas,
+    /// validates every offset, and prints the derived projection. Only the node-class vtable drifts.
+    /// See resources/atlas-research-notes.md "FULLY SOLVED".</para></summary>
+    public static class AtlasNode
+    {
+        public const int MapNodeId   = 0x300; // ✓ u32 — distinct per node
+        public const int Content     = 0x310; // (community) u32 content (0 = none)
+        public const int State       = 0x32C; // (community) u8 state (seen =1 on loaded nodes)
+        public const int Biome       = 0x32E; // ✓ u8 biome index (0..12)
+        public const int Flags       = 0x32F; // (community) u8: bit0 unlocked, bit1 visited
+        public const int GridPos     = 0x320; // ✓ live 2026-06-08 — StdTuple2D<int> atlas grid coord (X,Y); 1:1 with node, range small (e.g. X[-16..31] Y[0..47]). The key for node-graph pathfinding. (GameHelper2-sourced)
+        public const int Completion  = 0x339; // (community) u8 per-node completion id
+        public const int ContentVec  = 0x350; // (community) StdVector begin (content list); End @ +0x358
+
+        /// <summary>Alternate node-DATA model (GameHelper2): <c>*(*(node+0x10)+0x20)</c> → a struct with
+        /// biome <c>+0x2CE</c> / status byte <c>+0x2CF</c> (bit0 accessible, bit1 completed) / mapId at
+        /// <c>+0x2A0</c> (ptr→ptr→ptr→UTF-16 "MapXxx"). Validated live 2026-06-08 (biome matches the
+        /// element's own <see cref="Biome"/> 200/200). POE2Radar reads biome/mapId DIRECTLY off the
+        /// element (<see cref="Biome"/>, <see cref="MapNodeId"/> + the +0x300 EndgameMaps row), so this
+        /// deeper model is an alternate source, not required.</summary>
+        public const int DataStorage = 0x10;   // *(node+0x10) → storage
+        public const int DataModel   = 0x20;   // *(storage+0x20) → nodeData
+        public const int DataBiome   = 0x2CE;  // u8 within nodeData
+        public const int DataStatus  = 0x2CF;  // u8 within nodeData: bit0 accessible, bit1 completed
+        public const int DataMapId   = 0x2A0;  // ptr chain → UTF-16 "MapXxx"
+    }
+
+    /// <summary>Atlas CONNECTION GRAPH (✓ live 2026-06-08, GameHelper2-sourced). The node canvas (the
+    /// parent holding the most node-class children — POE2Radar's detected <c>_nodeCanvas</c>) carries a
+    /// <c>StdVector</c> of edges at <c>+0x5A8</c>. Each edge is 20 bytes: <c>{ int unknown; StdTuple2D&lt;int&gt;
+    /// source; StdTuple2D&lt;int&gt; target }</c> — source @ +0x04, target @ +0x0C, both in node grid
+    /// coords (<see cref="AtlasNode.GridPos"/>). Live: 291 edges, 100% endpoints on real grid positions,
+    /// avg degree 2.9 / max 5 (a real sparse atlas graph). This is what enables "route from the player's
+    /// current node to a target node in the fewest hops" (A* over the graph, per GH2's FindShortestPathAStar).
+    /// Re-discover after a patch with <c>POE2Radar.Research --atlas-graph</c>.</summary>
+    public static class AtlasGraph
+    {
+        public const int ConnectionsVec = 0x5A8; // on the node canvas: StdVector<edge> begin; End @ +0x5B0
+        public const int EdgeStride     = 20;
+        public const int EdgeSourceOff  = 0x04;  // StdTuple2D<int>
+        public const int EdgeTargetOff  = 0x0C;  // StdTuple2D<int>
+
+        /// <summary>Current-location ("player icon") marker: the SINGLE non-node UiElement in the atlas
+        /// UI subtree whose <c>+0x300</c> field points at a node-class element. That target node is the map
+        /// the player is currently in (✓ live 2026-06-08 — held even while standing in a hideout). The
+        /// accessor is structural, not vtable-keyed (the marker's class drifts per patch), so it's found by
+        /// "the lone non-node element whose +0x300 ∈ node set". <c>currentNode = *(marker + 0x300)</c>, then
+        /// read the node's <see cref="AtlasNode.GridPos"/>. Re-discover with <c>--atlas-marker</c>.</summary>
+        public const int CurrentMarkerNodePtr = 0x300;
+    }
+
+    /// <summary>Atlas screen panel — a PERSISTENT direct child of UiRoot (the element at
+    /// <c>InGameState+0x2F0</c>, walked via its Children StdVector <c>+0x10</c>) at <see cref="UiRootChildIndex"/>.
+    /// Present from a cold launch even when the atlas has NEVER been opened (✓ live 2026-06-08); its
+    /// UiElement visible bit (Flags <c>+0x180</c> bit <c>0x0B</c>) is the only thing that toggles when the
+    /// atlas opens/closes (closed flags 0x5626F5 → open 0x562EF5). This is the cheap atlas open-gate:
+    /// reading this one element's visible bit is ~4 reads, versus BFS-walking the ~50k-element UI tree to
+    /// (re)detect the node class — which while the atlas is closed can never succeed and so would burn that
+    /// BFS every retry. <b>If a patch shifts UiRoot's children this index drifts</b> — re-discover by
+    /// diffing the DevTree <c>/api/ui-flat</c> tree closed-vs-open (the element whose visible bit flips at
+    /// the shallowest stable path). <see cref="ExpectedChildCount"/> is a secondary signature (18 children).</summary>
+    public static class AtlasPanel
+    {
+        public const int UiRootChildIndex  = 22; // ✓ live 2026-06-08 — stable across a cold restart
+        public const int ExpectedChildCount = 18; // ✓ signature (panel had 18 children closed + open)
+    }
+
+    /// <summary>World hover tracker (community, 2026-06-07): <c>*(UiRoot+0x7D8)+0x630</c>; hovered entity
+    /// at +0x18. Singletons share vtable (image+0x2D707D8). The capture anchor for "what am I pointing at".</summary>
+    public static class HoverTracker
+    {
+        public const int FromUiRoot   = 0x7D8; // *(UiRoot + 0x7D8) → tracker container
+        public const int WorldTracker = 0x630; // + 0x630 → world hover tracker
+        public const int HoveredEntity = 0x18; // + 0x18 → hovered entity/element
     }
 }

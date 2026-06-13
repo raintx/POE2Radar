@@ -66,9 +66,25 @@ clearly gated — a personal QoL tool, not a headless bot.
   `/api/icons` — the icon library for the dashboard's SVG-preview shape pickers).
 - `Input/SendInputNative.cs` — scancode `SendInput` for auto-flask.
 
-**Research** (`src/POE2Radar.Research/Program.cs`) — probes: `--hp` (value-scan), `--chain`,
+**Research** (`src/POE2Radar.Research/Program.cs`) — probes: `--hp` (value-scan), `--vitals`
+(dump the local player's Life component — what the configured Health/Mana/ES offsets read + every
+valid VitalStruct in the component; the per-patch re-validation for the auto-flask pools), `--chain`,
 `--entity`, `--find`/`--find-entities`/`--find-terrain`/`--find-map`, `--tiles`, `--rarity`,
-`--info`, `--watch` (area-change logger), `--dump`.
+`--info`, `--watch` (area-change logger), `--dump`, `--presence` (walk-stable before/after diff to
+find a buffed scalar), `--devtree` (browser-based live memory/UI/entity explorer at
+`localhost:7778` — `DevTree/DevTreeServer.cs` + `DevTreeHtml.cs`; the PoE2 stand-in for ExileApi's
+DevTree), and `--atlas-probe` (one-shot ATLAS PROJECTION recovery/validation — run with the Atlas map
+open after a patch: re-locates the node class + canvas, validates every offset (PASS/⚠DRIFT), and prints
+the derived projection + paste-ready offsets; the `--atlas-{xform,canvas,nodes2,readnodes,corr}` probes
+remain for deep re-discovery), and `--atlas-graph` (validates the node GRAPH — per-node grid coords
+`AtlasNode.GridPos +0x320` + the connection-edge `StdVector` `AtlasGraph.ConnectionsVec` on the canvas
+`+0x5A8`; brute-scans for both so it self-heals on drift — the basis for node-to-node atlas pathfinding).
+
+**Atlas overlay projection** (✓ live, pan + zoom): atlas nodes are UiElements; a node's screen pos is
+`screen = (UIscale × zoom) × relPos + offset` — relPos `+0x118` (read live; PAN is baked in), zoom =
+node/canvas scale `+0x130` (read live), UIscale = winH/1600, offset calibrated once (F10/F11). NOT a
+perspective homography. Calibration is a scale+translate RANSAC fit (`AtlasHomography`); the linear part
+is rescaled by liveZoom/calibZoom each frame. See `resources/atlas-research-notes.md` "FULLY SOLVED".
 
 ## Key facts (validated live; re-verify per patch)
 
