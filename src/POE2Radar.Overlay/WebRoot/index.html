@@ -284,9 +284,20 @@
 
         <div class="panel-grid">
 
-          <div class="card">
+            <div class="card">
+              <h3 data-i18n="language">Idioma</h3>
+              <label class="row" style="cursor:pointer">
+                <span class="rl" data-i18n="language">Idioma<small data-i18n="langDesc">Escolha o idioma do painel.</small></span>
+                <select id="setLang" style="background:#0c0a07;color:var(--ink);border:1px solid var(--line);border-radius:2px;padding:3px 6px;font-family:inherit;font-size:11px">
+                  <option value="auto">Automático (Navegador)</option>
+                  <option value="pt">Português (Brasil)</option>
+                  <option value="en">English</option>
+                </select>
+              </label>
+            </div>
 
-            <h3 data-i18n="dispRadar" data-i18n="dispRadar">Radar Display</h3>
+            <div class="card">
+              <h3 data-i18n="dispRadar" data-i18n="dispRadar">Radar Display</h3>
 
             <div class="row"><div class="rl" data-i18n="showTerr" data-i18n="showTerr">Show terrain<small data-i18n="showTerrDesc" data-i18n="showTerrDesc">walkable-terrain bitmap</small></div>
 
