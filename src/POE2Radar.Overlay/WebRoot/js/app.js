@@ -1208,7 +1208,14 @@ function renderState(){
 
   $('#hpBar').style.width=hp+'%'; $('#mpBar').style.width=mp+'%'; $('#esBar').style.width=es+'%';
 
-  $('#hpNum').textContent=hp.toFixed(0)+'%'; $('#mpNum').textContent=mp.toFixed(0)+'%'; $('#esNum').textContent=es.toFixed(0)+'%';
+  
+  if (s.hpCur !== undefined && s.hpMax > 0) {
+    $('#hpNum').textContent = `${s.hpCur}/${s.hpMax} (${hp.toFixed(0)}%)`;
+    $('#mpNum').textContent = `${s.manaCur}/${s.manaMax} (${mp.toFixed(0)}%)`;
+    $('#esNum').textContent = `${s.esCur}/${s.esMax} (${es.toFixed(0)}%)`;
+  } else {
+    $('#hpNum').textContent=hp.toFixed(0)+'%'; $('#mpNum').textContent=mp.toFixed(0)+'%'; $('#esNum').textContent=es.toFixed(0)+'%';
+  }
 
   const areaName=(s.areaName&&s.areaName!==s.areaCode)?s.areaName:'';
 
@@ -1234,7 +1241,13 @@ function renderState(){
 
   $('#cLm').textContent=s.landmarkCount||0;
 
-  $('#areaChip').innerHTML = (areaName||s.areaCode||'тАФ') + ' <b>┬╖</b> ' + (s.inGame?'in game':'town/menu');
+let timeStr = '';
+  if (s.inGame && s.areaSeconds !== undefined && s.areaSeconds > 0) {
+    const mins = Math.floor(s.areaSeconds / 60);
+    const secs = s.areaSeconds % 60;
+    timeStr = ` - ${mins}m ${secs}s`;
+  }
+  $('#areaChip').innerHTML = (areaName||s.areaCode||'—') + ' <b>· -</b> ' + (s.inGame ? (i18n.inGame || 'in game') : (i18n.menu || 'town/menu')) + timeStr;
 
 
 
