@@ -157,6 +157,7 @@ public sealed class ApiServer : IDisposable
                     poiCount = s.Entities.Count(e => e.Poi),
                     landmarkCount = s.Landmarks.Count,
                     counts,
+                    worldMs = s.WorldMs, renderMs = s.RenderMs,
                 }, Json));
                 break;
             }
@@ -652,8 +653,11 @@ public sealed class ApiServer : IDisposable
             var parsed = JsonSerializer.Deserialize<GroundItemSettings>(el.GetRawText(), Json);
             if (parsed == null) return false;
             parsed.HighlightMinEx = Math.Max(0, parsed.HighlightMinEx);
+            parsed.UniqueMinEx = Math.Max(0, parsed.UniqueMinEx);
             parsed.MinQuantity = Math.Clamp(parsed.MinQuantity, 0, 100000);
             parsed.League = (parsed.League ?? "").Trim();
+            parsed.Categories = (parsed.Categories ?? new())
+                .Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.OrdinalIgnoreCase).Take(32).ToList();
             g = parsed;
             return true;
         }
@@ -912,7 +916,11 @@ public sealed record RadarState(
     string FlaskNote,
     string AreaCode,
     string CharName,
-    int CharLevel)
+    int CharLevel,
+    // Threading validation timers: the last world-pass duration (background thread) and the last
+    // render-frame duration (render thread), in milliseconds. Surfaced via /state for stress-testing.
+    float WorldMs = 0,
+    float RenderMs = 0)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,

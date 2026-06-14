@@ -48,8 +48,20 @@ clearly gated — a personal QoL tool, not a headless bot.
   grid↔world scale (250/23 ≈ 10.87).
 
 **Overlay** (`src/POE2Radar.Overlay/`):
-- `RadarApp.cs` — tick loop. Render rate (~144 Hz): live player + render. World rate (~30 Hz):
-  refresh entities/terrain/landmarks. Publishes a `RadarState` for the API; runs auto-flask.
+- `RadarApp.cs` — **two threads** (the render thread is never blocked by the heavy walk):
+  - *Render loop* (`Tick`, ~`FpsCap` Hz): fast per-frame reads on its OWN reader stack (`_liveRender`) —
+    live player/vitals/camera/map + auto-flask + HP-bar live pos — then draws from the lock-free
+    published snapshots. Publishes `RadarState` for the API.
+  - *World loop* (`WorldLoop`→`WorldTick`, ~30 Hz, own thread + reader `_live`): the heavy entity/terrain/
+    landmark walk + mod catalog + HP-bar specs + item labels + atlas update + nav/route maintenance.
+    Publishes an immutable `WorldSnapshot` (+ a separate `AtlasRender` bundle) the render thread reads
+    lock-free (volatile reference swap, same idiom as `_state`).
+  - Three INDEPENDENT reader stacks over the one `ProcessHandle` (RPM is concurrency-safe; the per-instance
+    buffers/caches are NOT): `_live` (world), `_liveRender` (render), `_liveApi` (HTTP/tile scans). `_atlas`
+    is internally locked, so it's shared. HP-bar live reads carry the mob's Render/Life component addresses
+    in the spec (`Poe2Live.TryBarComponents`/`TryLiveBarAt`) so the render thread reads them with no shared
+    cache. The render thread gates drawing of snapshot data on `snap.AreaHash == liveAreaHash` (zone-load
+    guard). `/state` exposes `worldMs`/`renderMs` timers. Auto-flask STAYS on the render thread.
 - `Overlay/OverlayWindow.cs` — per-pixel-alpha layered window (`UpdateLayeredWindow`), tracks the
   game window. `Overlay/OverlayRenderer.cs` — Direct2D: terrain bitmap + entity dots + landmark
   markers + world-space HP bars + player blip + HUD. Drawn only when PoE2 is focused. Icon

@@ -22,9 +22,19 @@ public sealed class RadarApp : IDisposable
     private const int WorldHz = 30;
 
     private readonly ProcessHandle _process;
-    private readonly MemoryReader _reader;
-    private readonly Poe2Live _live;
+    // Three INDEPENDENT reader stacks over the one shared ProcessHandle (ReadProcessMemory is itself
+    // concurrency-safe; the per-instance buffers + caches in MemoryReader/Poe2Live are NOT). Each thread
+    // owns its own so nothing mutable is shared: _live = world thread (entity/terrain/landmark walk),
+    // _liveRender = render thread (player/vitals/camera/map + HP-bar live reads), _liveApi = HTTP thread
+    // (tile-path scans). _atlas is internally locked, so it's shared across all three.
+    private readonly MemoryReader _reader;        // world thread
+    private readonly Poe2Live _live;              // world thread
+    private readonly MemoryReader _readerRender;  // render thread
+    private readonly Poe2Live _liveRender;        // render thread
+    private readonly MemoryReader _readerApi;     // HTTP/API thread
+    private readonly Poe2Live _liveApi;           // HTTP/API thread
     private readonly Poe2Atlas _atlas;
+    private readonly Poe2Runeforge _runeforge;    // world thread (reads the rune-crafting reward panel)
     private readonly OverlayWindow _window;
     private readonly OverlayRenderer _renderer;
     private readonly ApiServer _api;
@@ -40,7 +50,6 @@ public sealed class RadarApp : IDisposable
     private readonly LandmarkStore _landmarkStore;
     private readonly ModCatalog _modCatalog;
     private readonly Pricing.PriceBook _priceBook;
-    private readonly List<ItemLabel> _itemLabels = new();   // priced unique drops, rebuilt at world rate
     private int _landmarkGen;
     private int _displayRulesGen;
     private int _landmarkStoreGen;
@@ -51,21 +60,35 @@ public sealed class RadarApp : IDisposable
     private volatile RadarState _state = RadarState.Empty;
 
     // ── Atlas overlay: live node highlights (takes precedence over the radar when the atlas is open). ──
+    // The render-consumed outputs (open flag + marks + route) are published as ONE immutable record the
+    // world thread swaps atomically and the render thread reads lock-free — same lock-free-snapshot idiom
+    // as _world / _state below.
+    private sealed record AtlasRender(bool Open, IReadOnlyList<AtlasMark> Marks, NumVec2? Start, NumVec2? End, IReadOnlyList<NumVec2>? Route)
+    {
+        public static readonly AtlasRender Closed = new(false, Array.Empty<AtlasMark>(), null, null, null);
+    }
+    private volatile AtlasRender _atlasRender = AtlasRender.Closed;
+
+    // ── Runeforge ("Runeshape Combinations") priced-reward labels: same lock-free published-record idiom.
+    //    Built on the world thread (panel read + price lookup), read by the render thread. ──
+    private sealed record RuneRender(bool Open, IReadOnlyList<RuneLabel> Labels)
+    {
+        public static readonly RuneRender Closed = new(false, Array.Empty<RuneLabel>());
+    }
+    private volatile RuneRender _runeRender = RuneRender.Closed;
+
     private readonly object _atlasLock = new();
     private readonly HashSet<nint> _atlasSel = new();   // selected node element addresses (from the dashboard)
-    private bool _atlasOpen;
-    private List<AtlasMark> _atlasMarks = new();         // tracked/arrowed nodes to highlight (rings + arrows)
-    private DateTime _nextInspectAt = DateTime.MinValue; // F10 hotkey debounce
+    private DateTime _nextInspectAt = DateTime.MinValue; // F10 hotkey debounce (render thread)
     // F10 route workflow (manual, no memory-marker dependency): 1st F10 sets START tile, 2nd sets END tile
     // (and routes between them through the connection graph), 3rd resets. Stored by GRID coord so they
-    // survive pan/zoom and the tiles going off-screen.
+    // survive pan/zoom and the tiles going off-screen. Written by F10 (render thread), read by UpdateAtlas
+    // (world thread) — guarded by _atlasLock (nullable int-tuples aren't torn-read-safe).
     private (int X, int Y)? _atlasStartGrid;
     private (int X, int Y)? _atlasGoalGrid;
-    private NumVec2? _atlasStartPt, _atlasEndPt; // start/end in canvas relPos (for the markers), per tick
-    private List<NumVec2> _atlasRoute = new();   // graph path start→end in canvas relPos (empty if none)
-    private DateTime _atlasGoodAt = DateTime.MinValue; // last tick we read nodes — debounces transient misses
+    private DateTime _atlasGoodAt = DateTime.MinValue; // last tick we read nodes — debounces transient misses (world)
     private long _lastAtlasSig;          // view+inputs signature — when unchanged, marks/route stay frozen (no arrow jitter)
-    private bool _builtAtlasOnce;        // marks built at least once this atlas session
+    private bool _builtAtlasOnce;        // marks built at least once this atlas session (world)
     // Live atlas zoom (= canvas/node scale @ +0x130; 0.85 max-out … larger zoomed in). relPos is read
     // live (pan baked in) and the projection scales by this zoom, so rings track pan AND zoom.
     private volatile float _atlasZoom = 0.85f;
@@ -77,18 +100,49 @@ public sealed class RadarApp : IDisposable
     /// <summary>Directory holding the user config files (shared with <see cref="RadarSettings"/>).</summary>
     private static string ConfigDir => Path.Combine(AppContext.BaseDirectory, "config");
 
-    private DateTime _worldAt = DateTime.MinValue;
-    private List<Poe2Live.EntityDot> _entities = new();
-    // Monster HP-bar pipeline. _hpSpecs (style + which mobs get a bar) is rebuilt at WORLD rate from the
-    // resolved rules; _hpFrame (live position + HP) is rebuilt every RENDER frame from cheap per-mob reads
-    // so bars track moving monsters smoothly without re-enumerating/re-resolving thousands of entities.
-    private readonly record struct HpBarSpec(nint Entity, float Width, uint Fill, float BorderWidth, uint Border);
-    private readonly List<HpBarSpec> _hpSpecs = new();
-    private readonly List<HpBarTarget> _hpFrame = new();
-    private IReadOnlyList<Poe2Live.Landmark> _landmarks = Array.Empty<Poe2Live.Landmark>();
-    private Poe2Live.TerrainData? _terrain;
-    private uint _areaHash;
-    private nint _lastAreaInstance;
+    // ── World-thread working fields (written ONLY by the world tick; never read by the render thread —
+    //    the render thread reads the published _world snapshot instead). ──
+    private Thread? _worldThread;                           // the ~30 Hz background world loop (self-paced)
+    private List<Poe2Live.EntityDot> _entities = new();     // world only
+    // Monster HP-bar pipeline: the SPEC (style + which mobs get a bar + their component addresses) is
+    // rebuilt at WORLD rate; _hpFrame (live position + HP) is rebuilt every RENDER frame from cheap per-mob
+    // reads (via the spec's captured addresses) so bars track moving monsters smoothly without re-walking.
+    private readonly record struct HpBarSpec(nint Entity, nint Render, nint Life, float Width, uint Fill, float BorderWidth, uint Border);
+    private readonly List<HpBarTarget> _hpFrame = new();   // render-thread scratch (rebuilt per frame)
+    // Ground-item label SPEC (world rate): the priced facts + the item's Render component address. Its
+    // live world position is re-read every RENDER frame into _itemFrame so the label tracks smoothly
+    // (dropped items bob, so a 30 Hz-sampled position aliases/jitters when projected at render rate —
+    // same reason HP bars re-read per frame).
+    private readonly record struct ItemLabelSpec(nint Render, string Name, string Value, bool Highlight, bool ShowName);
+    private readonly List<ItemLabel> _itemFrame = new();   // render-thread scratch (rebuilt per frame)
+    private IReadOnlyList<Poe2Live.Landmark> _landmarks = Array.Empty<Poe2Live.Landmark>(); // world only
+    private Poe2Live.TerrainData? _terrain;                 // world only
+    private int _charLevel;                                 // world only (published in the snapshot)
+    private nint _lastAreaInstance;                         // world only: terrain-cache invalidation + atlas anchor
+
+    // ── Published lock-free snapshot: the world tick swaps this whole immutable record; the render thread
+    //    reads it once per frame. Same idiom as _state / _atlasRender. ──
+    private sealed record WorldSnapshot(
+        bool InGame, uint AreaHash, int AreaLevel, string AreaCode, int CharLevel,
+        IReadOnlyList<Poe2Live.EntityDot> Entities,
+        IReadOnlyList<Poe2Live.Landmark> Landmarks,
+        Poe2Live.TerrainData? Terrain,
+        IReadOnlyList<HpBarSpec> HpSpecs,
+        IReadOnlyList<ItemLabelSpec> ItemLabels,
+        IReadOnlyList<SelectedPath> SelectedPaths,
+        IReadOnlyList<LegendEntry> Legend,
+        IReadOnlyList<string> SelectedSnapshot)
+    {
+        public static readonly WorldSnapshot Empty = new(
+            false, 0, 0, "", 0, Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), null,
+            Array.Empty<HpBarSpec>(), Array.Empty<ItemLabelSpec>(), Array.Empty<SelectedPath>(),
+            Array.Empty<LegendEntry>(), Array.Empty<string>());
+    }
+    private volatile WorldSnapshot _world = WorldSnapshot.Empty;
+    private NumVec2 _worldPlayer;          // the world tick's current player grid (for off-thread replans)
+    private volatile float _worldMs, _renderMs;  // last world-pass / render-frame durations (ms) — /state timers
+
+    private uint _areaHash;        // render thread: live area hash (RadarState + zone-load draw gate)
     private nint _gameHwnd;
     private volatile bool _shutdown;
 
@@ -101,9 +155,8 @@ public sealed class RadarApp : IDisposable
     private DateTime _nextBrowserAt = DateTime.MinValue;
     private float _hpPct = 100f, _manaPct = 100f, _esPct = 100f;
     private string _flaskNote = "";
-    private string _areaCode = "", _charName = "";
+    private string _charName = "";   // render thread (RadarState.CharName); area code comes from the snapshot
     private nint _charNameFor;   // local-player ptr the cached _charName was read for (re-read only on change)
-    private int _charLevel;
     private float[]? _cameraMatrix;
 
     // Render inputs rebuilt at world rate (30 Hz), not per render frame: they only change with the
@@ -130,8 +183,10 @@ public sealed class RadarApp : IDisposable
     // selected id. The tick thread does only CHEAP per-tick maintenance (cursor advance) and rebuilds
     // _selectedPaths from the trackers; the worker owns all A*. See BackgroundReplanner / RouteTracker.
     private readonly BackgroundReplanner _replanner = new();
-    private readonly Dictionary<string, RouteTracker> _trackers = new(); // one per selected id; OWNED by the tick thread
-    private List<NavTarget> _navTargets = new();                         // unified targets, rebuilt each world tick
+    private readonly Dictionary<string, RouteTracker> _trackers = new(); // one per selected id; OWNED by the world thread
+    // Built wholesale by the world tick; read by reference from the render thread (F6 add-nearest) and the
+    // API thread (TargetLabel). volatile so those readers always see a fully-built list, never a torn one.
+    private volatile List<NavTarget> _navTargets = new();                // unified targets, rebuilt each world tick
     // The ONLY state shared with the HTTP/API thread. Every read/iterate/mutate of _selectedIds is
     // done under _navLock (snapshot to a local, then work outside the lock). Trackers are reconciled
     // from this list on the tick thread only — mutators (in-game + API) just edit _selectedIds.
@@ -163,7 +218,15 @@ public sealed class RadarApp : IDisposable
         Console.WriteLine($"Settings: {RadarSettings.FilePath}");
         Console.WriteLine($"Entity names: {EntityNameResolver.Shared.Count} mappings; zones: {ZoneGuide.Shared.Count}");
         _live = new Poe2Live(reader, gameStateSlot);
+        // Independent reader stacks for the render + API threads (see the field declarations): each owns
+        // its own MemoryReader/Poe2Live so the world walk, the render-frame reads, and the API tile scan
+        // never share the non-thread-safe per-instance buffers/caches. All read the one shared handle.
+        _readerRender = new MemoryReader(process);
+        _liveRender = new Poe2Live(_readerRender, gameStateSlot);
+        _readerApi = new MemoryReader(process);
+        _liveApi = new Poe2Live(_readerApi, gameStateSlot);
         _atlas = new Poe2Atlas(reader);
+        _runeforge = new Poe2Runeforge(reader);   // world-thread reader stack
         _window = OverlayWindow.Create();
         _renderer = new OverlayRenderer(_window);
         // Clicking a legend row toggles that landmark in the path selection. Purely local UI — the
@@ -289,162 +352,161 @@ public sealed class RadarApp : IDisposable
     public void Run()
     {
         _gameHwnd = OverlayNative.FindWindowForProcess(_process.ProcessId);
+        // The heavy world-rate walk runs on its OWN thread (Phase 3); the render loop below only does
+        // fast per-frame reads + draw, so a slow world pass (big pack, zone load) never hitches frames.
+        _worldThread = new Thread(WorldLoop) { IsBackground = true, Name = "POE2Radar.World" };
+        _worldThread.Start();
         while (!_shutdown)
         {
             if (_gameHwnd == 0) _gameHwnd = OverlayNative.FindWindowForProcess(_process.ProcessId);
             if (_gameHwnd != 0) _window.TrackGameWindow(_gameHwnd);
             if (!_window.PumpMessages()) break;
             Tick();
-            // Configurable frame budget (read live so dashboard edits apply immediately). The world
-            // walk is independently throttled to WorldHz inside Tick().
+            // Configurable frame budget (read live so dashboard edits apply immediately).
             var hz = Math.Clamp(_settings.FpsCap, 15, 360);
             Thread.Sleep(Math.Max(1, 1000 / hz));
         }
     }
 
+    /// <summary>The background world loop (~<see cref="WorldHz"/> Hz, adaptive): resolve the chain on its
+    /// own reader stack and run <see cref="WorldTick"/>, then sleep the remainder of the frame budget. All
+    /// heavy reads live here so the render thread is never blocked. Never throws out (a read failure mid
+    /// zone-load just publishes nothing this pass).</summary>
+    private void WorldLoop()
+    {
+        var sw = new System.Diagnostics.Stopwatch();
+        var budgetMs = 1000 / WorldHz;
+        while (!_shutdown)
+        {
+            sw.Restart();
+            try
+            {
+                if (_live.TryResolve(out var inGameState, out var areaInstance, out var localPlayer))
+                    WorldTick(inGameState, areaInstance, localPlayer);
+                else
+                    PublishEmptyWorld();
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"World tick error: {ex.Message}"); }
+            _worldMs = (float)sw.Elapsed.TotalMilliseconds;
+            Thread.Sleep(Math.Max(1, budgetMs - (int)sw.ElapsedMilliseconds));
+        }
+    }
+
+    /// <summary>Not in game: publish an empty world snapshot + closed atlas so the render thread draws no
+    /// stale entities/route (the selection itself is left intact so a loading screen keeps it).</summary>
+    private void PublishEmptyWorld()
+    {
+        if (!ReferenceEquals(_world, WorldSnapshot.Empty)) _world = WorldSnapshot.Empty;
+        if (!ReferenceEquals(_atlasRender, AtlasRender.Closed))
+        {
+            _atlasRender = AtlasRender.Closed;
+            _builtAtlasOnce = false; _lastAtlasSig = 0;
+        }
+        if (!ReferenceEquals(_runeRender, RuneRender.Closed)) _runeRender = RuneRender.Closed;
+    }
+
+    /// <summary>Read the open "Runeshape Combinations" panel (cheap when closed) and publish a priced label
+    /// per visible reward (stack-total = unit × count, in Exalted, colored by value tier) for the renderer
+    /// to draw on each row. Screen rects are scaled for the current game-window size. World thread.</summary>
+    private void UpdateRuneforge(nint inGameState)
+    {
+        var cfg = _settings.GroundItems;   // shares the ground-item pricing toggle + league
+        if (!cfg.Enabled || !_priceBook.IsLoaded)
+        {
+            if (!ReferenceEquals(_runeRender, RuneRender.Closed)) _runeRender = RuneRender.Closed;
+            return;
+        }
+        var rewards = _runeforge.ReadRewards(inGameState, _window.Width, _window.Height);
+        if (!_runeforge.PanelOpen || rewards.Count == 0)
+        {
+            if (!ReferenceEquals(_runeRender, RuneRender.Closed)) _runeRender = RuneRender.Closed;
+            return;
+        }
+        var labels = new List<RuneLabel>(rewards.Count);
+        foreach (var r in rewards)
+        {
+            if (_priceBook.TryByName(r.Name) is not { } pr) continue;     // unknown reward → no label
+            var count = Math.Max(1, r.Count);
+            var totalEx = pr.Exalted * count;
+            var text = (count > 1 ? $"{count}× " : "") + _priceBook.Format(totalEx);
+            // Value tier (absolute Exalted): ≥5 ex green, <0.5 ex dim red, else amber.
+            var color = totalEx >= 5.0 ? 0xFF66E066u : totalEx < 0.5 ? 0xFFE06666u : 0xFFE6C84Du;
+            labels.Add(new RuneLabel(r.X, r.Y, r.W, r.H, text, color));
+        }
+        _runeRender = new RuneRender(labels.Count > 0, labels);
+    }
+
+    /// <summary>One RENDER frame (render thread): fast per-frame reads on the render reader stack
+    /// (player/vitals/camera/map + auto-flask + HP-bar live pos), then draw from the lock-free world
+    /// snapshot. The heavy walk is on <see cref="WorldLoop"/>.</summary>
     private void Tick()
     {
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();   // no per-frame Stopwatch allocation
         HandleHotkeys();
 
-        var inGame = _live.TryResolve(out var inGameState, out var areaInstance, out var localPlayer);
+        var inGame = _liveRender.TryResolve(out var inGameState, out var areaInstance, out var localPlayer);
         var player = NumVec2.Zero;
         var map = default(Poe2Live.MapUi);
-        var areaLevel = 0;
+
+        // One lock-free read each of the two published snapshots — everything drawn this frame comes from
+        // these two + the live render-rate reads below.
+        var snap = _world;
+        var ar = _atlasRender;
+        var rr = _runeRender;
 
         if (inGame)
         {
-            // AreaInstance is a fresh object per area — use its address to invalidate per-area caches.
-            if (areaInstance != _lastAreaInstance) { _terrain = null; _lastAreaInstance = areaInstance; }
-            _areaInstanceForApi = areaInstance; // for /api/tiles
-            _inGameStateForApi = inGameState;   // for /api/atlas node read
-            _areaHash = _live.AreaHash(areaInstance);
-            areaLevel = _live.AreaLevel(areaInstance);
+            _areaInstanceForApi = areaInstance; // for /api/tiles (read by _liveApi on the HTTP thread)
+            _inGameStateForApi = inGameState;   // for /api/atlas + F10 route pick
+            _areaHash = _liveRender.AreaHash(areaInstance);
 
-            player = _live.PlayerGrid(localPlayer) ?? NumVec2.Zero;
-            map = _live.ReadMap(inGameState, areaInstance);
-            _areaCode = _live.AreaCode(areaInstance);
+            player = _liveRender.PlayerGrid(localPlayer) ?? NumVec2.Zero;
+            map = _liveRender.ReadMap(inGameState, areaInstance);
             // Player name reads a StdWString (allocates a string) — read it only when the local-player
             // pointer changes (i.e. once per session), not every render frame.
-            if (localPlayer != _charNameFor) { _charNameFor = localPlayer; _charName = _live.PlayerName(localPlayer); }
-            _cameraMatrix = _live.CameraMatrix(inGameState);
+            if (localPlayer != _charNameFor) { _charNameFor = localPlayer; _charName = _liveRender.PlayerName(localPlayer); }
+            _cameraMatrix = _liveRender.CameraMatrix(inGameState);
             TickAutoFlask(localPlayer);
 
-            var now = DateTime.UtcNow;
-            if ((now - _worldAt).TotalMilliseconds >= 1000.0 / WorldHz)
-            {
-                _worldAt = now;
-                _charLevel = _live.PlayerLevel(localPlayer);   // changes ~never; 30 Hz is plenty
-                _terrain ??= _live.Terrain(areaInstance);
-                _entities = _live.Entities(areaInstance);
-                // Drop the local player's own entity — it lives in the AwakeEntities map like any
-                // other Player, but the dedicated center blip already represents "you" (gated by
-                // ShowPlayerBlip). Without this, a Player-category dot renders at map-center even with
-                // the blip off. Filtering here (not the renderer) keeps the nav builder and HTTP API
-                // consistent, and still leaves party members visible as Player dots.
-                if (localPlayer != 0)
-                    _entities = _entities.Where(e => e.Address != localPlayer).ToList();
-                // Drop user-hidden entities once, here — so the renderer, nav-target builder, and the
-                // published RadarState (HTTP API) all see the same filtered list. Cull by metadata.
-                if (_hidden.Count > 0)
-                    _entities = _entities.Where(e => !_hidden.IsHidden(e.Metadata)).ToList();
-                // Accumulate any newly-seen monster mod ids into the persistent catalog (debounced write)
-                // so the dashboard rule editor can offer them and they survive restarts / new content.
-                _modCatalog.Observe(_entities);
-                // If the user edited the custom landmark patterns, drop the cached per-area scan so it
-                // rebuilds with the new patterns this tick (otherwise it only refreshes on zone change).
-                if (_landmarkPatterns.Generation != _landmarkGen)
-                {
-                    _landmarkGen = _landmarkPatterns.Generation;
-                    _live.InvalidateLandmarks();
-                }
-                // A changed display ruleset can add/remove "Tile" rules that surface tiles — rebuild.
-                if (_displayRules.Generation != _displayRulesGen)
-                {
-                    _displayRulesGen = _displayRules.Generation;
-                    _live.InvalidateLandmarks();
-                }
-                // Curated-landmark edits (Landmarks tab) change what surfaces + the labels — rebuild.
-                if (_landmarkStore.Generation != _landmarkStoreGen)
-                {
-                    _landmarkStoreGen = _landmarkStore.Generation;
-                    _live.InvalidateLandmarks();
-                }
-                // Live-apply a changed cluster radius (dashboard/config edit) the same way.
-                if (_settings.LandmarkClusterGap != _appliedClusterGap)
-                {
-                    _appliedClusterGap = _settings.LandmarkClusterGap;
-                    _live.LandmarkClusterGap = _appliedClusterGap;
-                    _live.InvalidateLandmarks();
-                }
-                // Live-apply a changed price league (dashboard/config edit) → re-fetch for that league.
-                if (_settings.GroundItems.League != _appliedLeague)
-                {
-                    _appliedLeague = _settings.GroundItems.League;
-                    _priceBook.SetLeagueOverride(_appliedLeague);
-                }
-                _landmarks = _live.Landmarks(areaInstance); // cached per area in Poe2Live
-
-                // Decide which mobs get an HP bar + their style ONCE here (rule resolve + colour parse) —
-                // the per-render-frame path then only re-reads position/HP for this small set.
-                BuildHpSpecs();
-
-                // Resolve + price unique ground drops (art basename → name + ex value) for the loot overlay.
-                _priceBook.RefreshIfDue();
-                BuildItemLabels();
-
-                // Atlas F10 route — ReadNodes is cheap when the atlas is closed (it gates on the atlas
-                // panel's visible bit before any whole-tree scan), so this is safe each world tick.
-                UpdateAtlas(inGameState);
-
-                // Rebuild the unified navigation-target list (tiles + entity POIs) for this tick.
-                _navTargets = BuildNavTargets(player);
-
-                // On a zone change: drop the (now-stale) selection, then apply the persistent
-                // auto-nav patterns against the new zone's targets. Keyed off the AreaInstance
-                // address (a fresh object per area), same signal the per-area caches use.
-                if (areaInstance != _navTargetsArea)
-                {
-                    _navTargetsArea = areaInstance;
-                    OnAreaChanged();
-                }
-
-                // Auto-deselect entity targets the game has marked complete (e.g. a looted expedition):
-                // they're already gone from the map + nav-target list, but the still-present (faded)
-                // entity would otherwise keep resolving, so the route would keep pathing to it.
-                PruneCompletedTargets();
-
-                // Per-tick route maintenance (draw-only, NO A* on this thread). For each selected
-                // target: cheaply advance its cursor; fire a BACKGROUND replan only on a real trigger.
-                // Then drain finished routes and rebuild _selectedPaths from the trackers' cursors.
-                MaintainRoutes(player);
-
-                // Selection snapshot + legend are render inputs that change only with the selection /
-                // nav-target list — rebuild them here (30 Hz) rather than every render frame.
-                _selectedSnapshot = SnapshotSelection();
-                _legend = BuildLegend(_selectedSnapshot);
-            }
-
-            // EVERY render frame (not just world ticks): refresh the live position + HP of each HP-bar mob
-            // so the bars track moving monsters smoothly. Cheap — two tiny reads per bar via cached
-            // component addresses; only the ~dozens of bar mobs, never the full entity map.
+            // Refresh each HP-bar mob's live position + HP from the world tick's spec (which captured the
+            // mob's Render/Life component addresses) using the RENDER reader — so bars track moving mobs
+            // smoothly with no shared cache. Cheap: two tiny reads per bar, only the ~dozens of bar mobs.
             _hpFrame.Clear();
-            foreach (var spec in _hpSpecs)
+            foreach (var spec in snap.HpSpecs)
             {
-                if (!_live.TryLiveBar(spec.Entity, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
+                if (!_liveRender.TryLiveBarAt(spec.Render, spec.Life, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
                 _hpFrame.Add(new HpBarTarget(w, Math.Clamp((float)cur / max, 0f, 1f), spec.Width, spec.Fill, spec.BorderWidth, spec.Border));
             }
-        }
-        else
-        {
-            _selectedPaths = new List<SelectedPath>();
-            _atlasOpen = false;
-            if (_hpFrame.Count > 0) _hpFrame.Clear();
-            if (_hpSpecs.Count > 0) _hpSpecs.Clear();
-            if (_itemLabels.Count > 0) _itemLabels.Clear();
-        }
 
-        _state = new RadarState(inGame, _areaHash, areaLevel, map.IsVisible, map.Zoom, player, _entities, _landmarks,
-            _hpPct, _manaPct, _esPct, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel);
+            // Ground-item labels: re-read each priced item's live world position THIS frame (dropped items
+            // bob), so the renderer projects a current position — the same per-frame reposition that keeps
+            // HP bars smooth. life arg 0 → world-pos only.
+            _itemFrame.Clear();
+            foreach (var s in snap.ItemLabels)
+            {
+                if (!_liveRender.TryLiveBarAt(s.Render, 0, out var w, out _, out _)) continue;
+                _itemFrame.Add(new ItemLabel(w, s.Name, s.Value, s.Highlight, s.ShowName));
+            }
+        }
+        else { if (_hpFrame.Count > 0) _hpFrame.Clear(); if (_itemFrame.Count > 0) _itemFrame.Clear(); }
+
+        // Zone-load guard: the world snapshot lags the live chain by up to one world pass, so right after a
+        // zone change its entities/terrain/route still belong to the PREVIOUS area. Only draw them once the
+        // snapshot's area hash matches the live one; otherwise draw none this frame (player blip + map still
+        // draw). The API still serves the latest snapshot regardless (no visual artifact there).
+        var worldFresh = inGame && snap.InGame && snap.AreaHash == _areaHash;
+        var entities = worldFresh ? snap.Entities : Array.Empty<Poe2Live.EntityDot>();
+        var landmarks = worldFresh ? snap.Landmarks : Array.Empty<Poe2Live.Landmark>();
+        var terrain = worldFresh ? snap.Terrain : null;
+        var selectedPaths = worldFresh ? snap.SelectedPaths : Array.Empty<SelectedPath>();
+        var legend = worldFresh ? snap.Legend : (IReadOnlyList<LegendEntry>)Array.Empty<LegendEntry>();
+        var hpTargets = worldFresh ? (IReadOnlyList<HpBarTarget>)_hpFrame : Array.Empty<HpBarTarget>();
+        var itemLabels = worldFresh ? (IReadOnlyList<ItemLabel>)_itemFrame : Array.Empty<ItemLabel>();
+        var selSnap = snap.SelectedSnapshot;
+
+        _state = new RadarState(inGame, snap.AreaHash, snap.AreaLevel, map.IsVisible, map.Zoom, player,
+            snap.Entities, snap.Landmarks, _hpPct, _manaPct, _esPct, _autoFlask, _flaskNote,
+            snap.AreaCode, _charName, snap.CharLevel, _worldMs, _renderMs);
 
         var realActive = _gameHwnd != 0 && GetForegroundWindow() == _gameHwnd;
         // "Always show" draws the overlay even when PoE2 isn't focused (for dashboard calibration).
@@ -457,10 +519,10 @@ public sealed class RadarApp : IDisposable
             WindowHeight: _window.Height,
             PlayerGrid: player,
             Map: map,
-            Entities: _entities,
-            Landmarks: _landmarks,
+            Entities: entities,
+            Landmarks: landmarks,
             AreaHash: _areaHash,
-            Terrain: _terrain,
+            Terrain: terrain,
             ScaleMul: _settings.ScaleMul,
             OffsetX: _settings.OffX,
             OffsetY: _settings.OffY,
@@ -468,8 +530,8 @@ public sealed class RadarApp : IDisposable
             ManaPct: _manaPct,
             EsPct: _esPct,
             FlaskNote: _flaskNote,
-            AreaCode: _areaCode,
-            CharLevel: _charLevel,
+            AreaCode: snap.AreaCode,
+            CharLevel: snap.CharLevel,
             CameraMatrix: _cameraMatrix,
             HideJunk: _settings.HideJunk,
             ShowPath: _settings.ShowPath,
@@ -481,20 +543,20 @@ public sealed class RadarApp : IDisposable
             HpBarMagic: _settings.HpBarMagic,
             HpBarRare: _settings.HpBarRare,
             HpBarUnique: _settings.HpBarUnique,
-            SelectedPaths: _selectedPaths,
-            IsSelected: _selectedSnapshot.Contains,
-            Legend: _legend,
+            SelectedPaths: selectedPaths,
+            IsSelected: id => selSnap.Contains(id),
+            Legend: legend,
             NavMenuExpanded: _navMenuExpanded,
             NavMenuCorner: _settings.NavMenuCorner,
             Styles: _settings.Styles,
             HpBars: _settings.HpBars,
-            HpBarTargets: _hpFrame,
+            HpBarTargets: hpTargets,
             TerrainStyle: _settings.Terrain,
-            ItemLabels: _itemLabels,
+            ItemLabels: itemLabels,
             Resolve: _resolveEntity,
             ResolveTile: _resolveTileDraw,
-            AtlasOpen: _atlasOpen,
-            AtlasNodes: _atlasMarks,
+            AtlasOpen: ar.Open,
+            AtlasNodes: ar.Marks,
             // Projection: derived live from the window height (UIscale = winH/1600) × live zoom. relPos is
             // read live so pan is already handled; the zoom term is folded into the scale. atlasProj is the
             // 8-coeff homography layout {h0..h7}. This is what makes non-1080p resolutions line up.
@@ -506,10 +568,12 @@ public sealed class RadarApp : IDisposable
             AtlasShearY: (float)atlasProj[3],
             AtlasPersX: (float)atlasProj[6],
             AtlasPersY: (float)atlasProj[7],
-            // F10 route: START/END markers + the graph path between them.
-            AtlasStart: (_atlasOpen && _settings.AtlasShowRoute) ? _atlasStartPt : null,
-            AtlasEnd: (_atlasOpen && _settings.AtlasShowRoute) ? _atlasEndPt : null,
-            AtlasRoute: (_atlasOpen && _settings.AtlasShowRoute && _atlasRoute.Count >= 2) ? _atlasRoute : null);
+            // F10 route: START/END markers + the graph path between them (from the atlas render bundle).
+            AtlasStart: (ar.Open && _settings.AtlasShowRoute) ? ar.Start : null,
+            AtlasEnd: (ar.Open && _settings.AtlasShowRoute) ? ar.End : null,
+            AtlasRoute: (ar.Open && _settings.AtlasShowRoute && ar.Route is { Count: >= 2 }) ? ar.Route : null,
+            // Rune-crafting reward prices (screen-space; only when the panel is open).
+            RuneLabels: rr.Open ? rr.Labels : null);
         // The overlay is only visible while PoE2 is foreground (Render draws nothing otherwise). Skip
         // the whole draw + UpdateLayeredWindow blit when unfocused — but render once on the focus-loss
         // transition so the last visible frame is cleared rather than left frozen on screen.
@@ -524,6 +588,130 @@ public sealed class RadarApp : IDisposable
         // LegendRowRects reflects the frame just drawn. Gate on REAL focus (never grab clicks when
         // PoE2 isn't foreground, even if "always show overlay" is keeping it drawn).
         UpdateClickThrough(realActive);
+        _renderMs = (float)System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// The world-rate pass (~30 Hz), run on the dedicated <see cref="WorldLoop"/> thread: the heavy
+    /// entity/terrain/landmark walk + mod catalog + HP-bar specs + item labels + atlas update +
+    /// nav-target/route maintenance, on the world reader stack (<see cref="_live"/>). Publishes an
+    /// immutable <see cref="WorldSnapshot"/> at the end for the render thread to consume lock-free.
+    /// </summary>
+    private void WorldTick(nint inGameState, nint areaInstance, nint localPlayer)
+    {
+        // AreaInstance is a fresh object per area — use its address to invalidate per-area caches.
+        if (areaInstance != _lastAreaInstance) { _terrain = null; _lastAreaInstance = areaInstance; }
+        var areaHash = _live.AreaHash(areaInstance);
+        var areaLevel = _live.AreaLevel(areaInstance);
+        var areaCode = _live.AreaCode(areaInstance);
+        var player = _live.PlayerGrid(localPlayer) ?? NumVec2.Zero;
+        _worldPlayer = player;   // for off-thread replans (EnqueueReplan)
+
+        // Tick the player's vitals on THIS (world) reader too — not for the flask (that's on the render
+        // thread's _liveRender), but for the side effect: it self-heals _live's Health-offset (drift) which
+        // backs the monster HP reads in Entities()/ReadHp. Pre-split the one _live instance did both, so the
+        // heal benefited monster bars; with split readers, _live must heal independently. Result discarded.
+        _ = _live.PlayerVitals(localPlayer);
+        _charLevel = _live.PlayerLevel(localPlayer);   // changes ~never; 30 Hz is plenty
+        _terrain ??= _live.Terrain(areaInstance);
+        _entities = _live.Entities(areaInstance);
+        // Drop the local player's own entity — it lives in the AwakeEntities map like any
+        // other Player, but the dedicated center blip already represents "you" (gated by
+        // ShowPlayerBlip). Without this, a Player-category dot renders at map-center even with
+        // the blip off. Filtering here (not the renderer) keeps the nav builder and HTTP API
+        // consistent, and still leaves party members visible as Player dots.
+        if (localPlayer != 0)
+            _entities = _entities.Where(e => e.Address != localPlayer).ToList();
+        // Drop user-hidden entities once, here — so the renderer, nav-target builder, and the
+        // published RadarState (HTTP API) all see the same filtered list. Cull by metadata.
+        if (_hidden.Count > 0)
+            _entities = _entities.Where(e => !_hidden.IsHidden(e.Metadata)).ToList();
+        // Accumulate any newly-seen monster mod ids into the persistent catalog (debounced write)
+        // so the dashboard rule editor can offer them and they survive restarts / new content.
+        _modCatalog.Observe(_entities);
+        // If the user edited the custom landmark patterns, drop the cached per-area scan so it
+        // rebuilds with the new patterns this tick (otherwise it only refreshes on zone change).
+        if (_landmarkPatterns.Generation != _landmarkGen)
+        {
+            _landmarkGen = _landmarkPatterns.Generation;
+            _live.InvalidateLandmarks();
+        }
+        // A changed display ruleset can add/remove "Tile" rules that surface tiles — rebuild.
+        if (_displayRules.Generation != _displayRulesGen)
+        {
+            _displayRulesGen = _displayRules.Generation;
+            _live.InvalidateLandmarks();
+        }
+        // Curated-landmark edits (Landmarks tab) change what surfaces + the labels — rebuild.
+        if (_landmarkStore.Generation != _landmarkStoreGen)
+        {
+            _landmarkStoreGen = _landmarkStore.Generation;
+            _live.InvalidateLandmarks();
+        }
+        // Live-apply a changed cluster radius (dashboard/config edit) the same way.
+        if (_settings.LandmarkClusterGap != _appliedClusterGap)
+        {
+            _appliedClusterGap = _settings.LandmarkClusterGap;
+            _live.LandmarkClusterGap = _appliedClusterGap;
+            _live.InvalidateLandmarks();
+        }
+        // Live-apply a changed price league (dashboard/config edit) → re-fetch for that league.
+        if (_settings.GroundItems.League != _appliedLeague)
+        {
+            _appliedLeague = _settings.GroundItems.League;
+            _priceBook.SetLeagueOverride(_appliedLeague);
+        }
+        _landmarks = _live.Landmarks(areaInstance); // cached per area in Poe2Live
+
+        // Decide which mobs get an HP bar + their style ONCE here (rule resolve + colour parse) —
+        // the per-render-frame path then only re-reads position/HP for this small set. Returns a fresh
+        // immutable list so the render thread can read it lock-free off the published snapshot.
+        var hpSpecs = BuildHpSpecs();
+
+        // Resolve + price unique ground drops (art basename → name + ex value) for the loot overlay.
+        _priceBook.RefreshIfDue();
+        var itemLabels = BuildItemLabels();
+
+        // Atlas F10 route — ReadNodes is cheap when the atlas is closed (it gates on the atlas
+        // panel's visible bit before any whole-tree scan), so this is safe each world tick. Publishes
+        // its own _atlasRender bundle.
+        UpdateAtlas(inGameState);
+
+        // Rune-crafting reward prices — cheap when the panel is closed (the fingerprint walk bails at the
+        // visible-gate step). Publishes its own _runeRender bundle.
+        UpdateRuneforge(inGameState);
+
+
+        // Rebuild the unified navigation-target list (tiles + entity POIs) for this tick.
+        _navTargets = BuildNavTargets(player);
+
+        // On a zone change: drop the (now-stale) selection, then apply the persistent
+        // auto-nav patterns against the new zone's targets. Keyed off the AreaInstance
+        // address (a fresh object per area), same signal the per-area caches use.
+        if (areaInstance != _navTargetsArea)
+        {
+            _navTargetsArea = areaInstance;
+            OnAreaChanged(areaHash);
+        }
+
+        // Auto-deselect entity targets the game has marked complete (e.g. a looted expedition):
+        // they're already gone from the map + nav-target list, but the still-present (faded)
+        // entity would otherwise keep resolving, so the route would keep pathing to it.
+        PruneCompletedTargets();
+
+        // Per-tick route maintenance (draw-only, NO A* on this thread). For each selected
+        // target: cheaply advance its cursor; fire a BACKGROUND replan only on a real trigger.
+        // Then drain finished routes and rebuild _selectedPaths from the trackers' cursors.
+        MaintainRoutes(player);
+
+        // Selection snapshot + legend are render inputs that change only with the selection /
+        // nav-target list — rebuild them here (30 Hz) rather than every render frame.
+        _selectedSnapshot = SnapshotSelection();
+        _legend = BuildLegend(_selectedSnapshot);
+
+        // Publish the whole immutable world snapshot atomically for the render thread.
+        _world = new WorldSnapshot(true, areaHash, areaLevel, areaCode, _charLevel,
+            _entities, _landmarks, _terrain, hpSpecs, itemLabels, _selectedPaths, _legend, _selectedSnapshot);
     }
 
     /// <summary>
@@ -596,9 +784,9 @@ public sealed class RadarApp : IDisposable
     /// the renderer (rarity gate + rule resolve + colour parse); doing it once per world tick — only for
     /// mobs with a live HP pool — leaves the render-frame path to just re-read position/HP and draw, which
     /// is what keeps 50–100 bars smooth without re-resolving thousands of entities every frame.</summary>
-    private void BuildHpSpecs()
+    private List<HpBarSpec> BuildHpSpecs()
     {
-        _hpSpecs.Clear();
+        var specs = new List<HpBarSpec>();
         var hb = _settings.HpBars;
         foreach (var e in _entities)
         {
@@ -623,8 +811,12 @@ public sealed class RadarApp : IDisposable
                 _                      => (0f, "#FFFFFF", 0f, "#FFFFFF"),
             };
             if (bw <= 0f) continue;
-            _hpSpecs.Add(new HpBarSpec(e.Address, bw, PackColor(fillHex), borderW, PackColor(borderHex)));
+            // Capture the mob's Render/Life component addresses (resolved by the Entities() walk just now,
+            // on THIS world reader) so the render thread can read live pos/HP off its own reader stack.
+            if (!_live.TryBarComponents(e.Address, out var render, out var life)) continue;
+            specs.Add(new HpBarSpec(e.Address, render, life, bw, PackColor(fillHex), borderW, PackColor(borderHex)));
         }
+        return specs;
     }
 
     /// <summary>
@@ -634,21 +826,52 @@ public sealed class RadarApp : IDisposable
     /// are) + value, and flags Highlight when the value clears the configured threshold (→ border). Gated
     /// by the GroundItems setting; cheap (a dictionary lookup per drop, no memory reads here).
     /// </summary>
-    private void BuildItemLabels()
+    private List<ItemLabelSpec> BuildItemLabels()
     {
-        _itemLabels.Clear();
+        var labels = new List<ItemLabelSpec>();
         var cfg = _settings.GroundItems;
-        if (!cfg.Enabled || !_priceBook.IsLoaded) return;
+        if (!cfg.Enabled || !_priceBook.IsLoaded) return labels;
+        // User-enabled value categories (group keys). Empty ⇒ nothing shows.
+        var enabled = cfg.Categories is { Count: > 0 }
+            ? new HashSet<string>(cfg.Categories, StringComparer.OrdinalIgnoreCase) : null;
+        if (enabled is null) return labels;
         foreach (var e in _entities)
         {
             if (e.ItemArt is not { Length: > 0 } art) continue;     // not a (resolved) ground item
-            if (e.Rarity != Poe2Live.Rarity.Unique) continue;        // uniques only (the art map's domain)
-            var p = _priceBook.TryByArt(art);
-            if (p is not { } pr) continue;                           // unknown art → no label (e.g. brand-new unique)
+            // Resolve by art basename (uniques + currency/rune/essence/… all indexed by art in the PriceBook).
+            if (_priceBook.TryByArt(art) is not { } pr) continue;    // unknown art → no label
             if (cfg.MinQuantity > 0 && pr.Quantity < cfg.MinQuantity) continue; // skip low-confidence mislistings
-            _itemLabels.Add(new ItemLabel(e.World, pr.Name, _priceBook.Format(pr.Exalted), pr.Exalted >= cfg.HighlightMinEx));
+            if (!enabled.Contains(CategoryGroup(pr.Category))) continue;        // category toggled off
+
+            // World-projected labels are now ONLY the fallback for UNIDENTIFIED UNIQUES — the one case the
+            // loot-tag overlay can't price (the game's tag shows the base type, not the unique name). Every
+            // other priced drop is labelled by the tag overlay (drawn ON the game's tag, perfectly aligned,
+            // no jitter). For an unID unique we reveal the resolved name + value at its world position.
+            if (e.Rarity != Poe2Live.Rarity.Unique || e.ItemIdentified) continue;
+            if (pr.Exalted < cfg.UniqueMinEx) continue;
+            if (!_live.TryBarComponents(e.Address, out var render, out _)) continue;
+            labels.Add(new ItemLabelSpec(render, pr.Name, _priceBook.Format(pr.Exalted), pr.Exalted >= cfg.HighlightMinEx, ShowName: true));
         }
+        return labels;
     }
+
+    /// <summary>Map a poe2scout price category to the user-facing ground-item group key
+    /// (<see cref="GroundItemSettings.Categories"/>). The six unique categories collapse to "Uniques".</summary>
+    private static string CategoryGroup(string category) => category switch
+    {
+        "weapon" or "armour" or "accessory" or "flask" or "jewel" or "sanctum" => "Uniques",
+        "runes" => "Runes",
+        "essences" => "Essences",
+        "currency" => "Currency",
+        "fragments" => "Fragments",
+        "breach" => "Breach",
+        "ritual" => "Ritual",
+        "delirium" => "Delirium",
+        "expedition" => "Expedition",
+        "ultimatum" => "Ultimatum",
+        "abyss" => "Abyss",
+        _ => "Other",
+    };
 
     /// <summary>Parse a "#RRGGBB" hex colour to packed 0xFFRRGGBB once (opacity = 1, matching the old
     /// per-frame ParseColor(hex, 1f) for HP bars). Falls back to opaque white on a malformed string.</summary>
@@ -782,11 +1005,16 @@ public sealed class RadarApp : IDisposable
         }
         if ((bestIn ?? bestAny) is not { } b) { Console.WriteLine("\n[atlas route] no tile under cursor (is the Atlas open?)."); return; }
 
-        // 1st press → set START · 2nd press → set END (route computed each tick) · 3rd → reset.
+        // 1st press → set START · 2nd press → set END (route computed each tick) · 3rd → reset. The grids
+        // are read by the world thread (UpdateAtlas/BuildAtlasRoute), so mutate them under _atlasLock —
+        // a nullable int-tuple isn't a torn-read-safe field.
         string stage;
-        if (_atlasStartGrid is null) { _atlasStartGrid = b.Grid; _atlasGoalGrid = null; stage = $"START = {b.Grid} '{b.MapName}'  (F10 another tile to set END)"; }
-        else if (_atlasGoalGrid is null) { _atlasGoalGrid = b.Grid; stage = $"END = {b.Grid} '{b.MapName}'  (routing from {_atlasStartGrid}; F10 again to reset)"; }
-        else { _atlasStartGrid = null; _atlasGoalGrid = null; stage = "route RESET (F10 a tile to set a new START)"; }
+        lock (_atlasLock)
+        {
+            if (_atlasStartGrid is null) { _atlasStartGrid = b.Grid; _atlasGoalGrid = null; stage = $"START = {b.Grid} '{b.MapName}'  (F10 another tile to set END)"; }
+            else if (_atlasGoalGrid is null) { _atlasGoalGrid = b.Grid; stage = $"END = {b.Grid} '{b.MapName}'  (routing from {_atlasStartGrid}; F10 again to reset)"; }
+            else { _atlasStartGrid = null; _atlasGoalGrid = null; stage = "route RESET (F10 a tile to set a new START)"; }
+        }
         Console.WriteLine($"\n[atlas route] {stage}");
     }
 
@@ -856,7 +1084,7 @@ public sealed class RadarApp : IDisposable
     /// RESTORE the selection we previously had for the zone we're entering (so a town round-trip keeps
     /// your pathing) or — on a first visit — seed it from the persistent auto-nav patterns. Trackers are
     /// NOT touched here — the per-tick reconciliation (ReconcileTrackers) syncs them to _selectedIds.</summary>
-    private void OnAreaChanged()
+    private void OnAreaChanged(uint areaHash)
     {
         int count; bool restored;
         lock (_navLock)
@@ -866,12 +1094,12 @@ public sealed class RadarApp : IDisposable
 
             _selectedIds.Clear();
             _selectionCapWarned = false;
-            _selectionAreaHash = _areaHash;
+            _selectionAreaHash = areaHash;
 
             // Returning to a remembered instance → restore its selection verbatim (the user's explicit
             // choices win, including an intentionally-empty one, so a zone they cleared stays cleared).
             List<string>? remembered = null;
-            restored = _areaHash != 0 && _zoneSelections.TryGetValue(_areaHash, out remembered);
+            restored = areaHash != 0 && _zoneSelections.TryGetValue(areaHash, out remembered);
             if (restored)
             {
                 foreach (var id in remembered!)
@@ -950,15 +1178,18 @@ public sealed class RadarApp : IDisposable
     }
 
     /// <summary>Distinct terrain-tile paths for the current area (served by /api/tiles for the add-rule
-    /// picker). Empty when not in game. Cached per area inside Poe2Live.</summary>
+    /// picker). Empty when not in game. Cached per area inside Poe2Live. Runs on the HTTP thread, so it
+    /// uses the API's OWN reader stack (_liveApi) — never the world thread's _live.</summary>
     private IReadOnlyList<string> CurrentTilePaths()
-        => _areaInstanceForApi != 0 ? _live.TilePaths(_areaInstanceForApi) : Array.Empty<string>();
+        => _areaInstanceForApi != 0 ? _liveApi.TilePaths(_areaInstanceForApi) : Array.Empty<string>();
 
 
-    /// <summary>F6: add the nearest navigation target not already selected into the selection.</summary>
+    /// <summary>F6 (render thread): add the nearest navigation target not already selected into the
+    /// selection.</summary>
     private void AddNearestPathTarget()
     {
-        if (_navTargets.Count == 0) return;
+        var targets = _navTargets;   // one volatile read — work off this fully-built list
+        if (targets.Count == 0) return;
         var player = _state.Player;
 
         // _navTargets isn't fully distance-sorted (tiles come first), so scan for the nearest
@@ -966,7 +1197,7 @@ public sealed class RadarApp : IDisposable
         var selected = SnapshotSelection();
         var bestId = (string?)null;
         var bestD = float.MaxValue;
-        foreach (var t in _navTargets)
+        foreach (var t in targets)
         {
             if (selected.Contains(t.Id)) continue;
             var d = NumVec2.DistanceSquared(t.Grid, player);
@@ -1150,7 +1381,7 @@ public sealed class RadarApp : IDisposable
     private void EnqueueReplan(string id, RouteTracker tracker, NumVec2 goal)
     {
         if (_terrain is not { } terrain) return; // can't plan without terrain yet
-        var player = _state.Player;
+        var player = _worldPlayer;   // the world tick's current player (this all runs on the world thread)
         tracker.MarkReplanRequested();
         _replanner.Enqueue(new BackgroundReplanner.Request(
             id, terrain, ((int)player.X, (int)player.Y), ((int)goal.X, (int)goal.Y)));
@@ -1171,7 +1402,8 @@ public sealed class RadarApp : IDisposable
         _selectedPaths = paths;
     }
 
-    /// <summary>Display label for a selected id (its NavTarget name if still present, else the raw id).</summary>
+    /// <summary>Display label for a selected id (its NavTarget name if still present, else the raw id).
+    /// Callable from the API thread (via ToggleSelectionCore), so it reads the volatile _navTargets once.</summary>
     private string TargetLabel(string id)
     {
         foreach (var t in _navTargets) if (t.Id == id) return t.Name;
@@ -1317,9 +1549,10 @@ public sealed class RadarApp : IDisposable
         };
     }
 
-    /// <summary>Read the live atlas nodes and update the F10 route. Cheap when the atlas is closed (ReadNodes
-    /// returns empty via its visibility gate). When open, tracks the live zoom (for projection) and rebuilds
-    /// the START/END markers + route path. Rides over transient empty reads so the route doesn't flicker.</summary>
+    /// <summary>Read the live atlas nodes and rebuild the highlight marks + F10 route, publishing them as a
+    /// single immutable <see cref="AtlasRender"/> the render thread reads lock-free. Runs on the world thread.
+    /// Cheap when the atlas is closed (ReadNodes returns empty via its visibility gate). Rides over transient
+    /// empty reads so the route doesn't flicker; freezes the marks when the view is static (no arrow jitter).</summary>
     private void UpdateAtlas(nint inGameState)
     {
         var nodes = _atlas.ReadNodes(inGameState);
@@ -1330,18 +1563,21 @@ public sealed class RadarApp : IDisposable
             // bit reads closed AND we've had no good read for a short grace — that absorbs both the node-read
             // miss and a racy visible-bit read, while still clearing promptly on a real close.
             var stillOpen = _atlas.IsAtlasOpen(inGameState) || (DateTime.UtcNow - _atlasGoodAt).TotalSeconds < 0.4;
-            if (_atlasOpen && stillOpen) return;             // keep last marks/route — no flicker
-            _atlasOpen = false; _builtAtlasOnce = false; _lastAtlasSig = 0;   // force a rebuild on reopen
-            if (_atlasMarks.Count > 0) _atlasMarks = new();
-            _atlasRoute = new(); _atlasStartPt = _atlasEndPt = null;   // (manual START/END grids persist)
-            return;
+            if (_atlasRender.Open && stillOpen) return;      // keep last marks/route — no flicker
+            _builtAtlasOnce = false; _lastAtlasSig = 0;      // force a rebuild on reopen
+            if (!ReferenceEquals(_atlasRender, AtlasRender.Closed)) _atlasRender = AtlasRender.Closed;
+            return;                                          // (manual START/END grids persist)
         }
         _atlasGoodAt = DateTime.UtcNow;
-        _atlasOpen = true;
         // Live zoom = the nodes' shared canvas scale (+0x130). Use the median (robust to a stray 0/odd node).
         // Drives both the ring projection and the route projection (relPos × winH/1600 × zoom).
         var scales = nodes.Where(n => n.Scale > 0.01f).Select(n => n.Scale).OrderBy(s => s).ToList();
         if (scales.Count > 0) _atlasZoom = scales[scales.Count / 2];
+
+        // Snapshot the cross-thread inputs ONCE under the lock: the F10 START/END grids (written by the
+        // render thread) and the dashboard node selection (written by the API thread).
+        (int X, int Y)? startGrid, goalGrid; HashSet<nint> sel;
+        lock (_atlasLock) { startGrid = _atlasStartGrid; goalGrid = _atlasGoalGrid; sel = new HashSet<nint>(_atlasSel); }
 
         // ARROW JITTER FIX — freeze the marks when the atlas view is static. PoE2 doesn't keep CULLED
         // (off-screen) UI elements' relPos cleanly updated, so off-screen nodes' positions are noisy — which
@@ -1362,19 +1598,16 @@ public sealed class RadarApp : IDisposable
             : (long)Math.Round(cxSum / onCount) * 73856093L
             ^ (long)Math.Round(cySum / onCount) * 19349663L
             ^ (long)Math.Round(_atlasZoom * 2000f) * 83492791L;
-        int selCnt; lock (_atlasLock) selCnt = _atlasSel.Count;
-        long inputSig = (long)(_atlasStartGrid?.GetHashCode() ?? 0)
-            ^ ((long)(_atlasGoalGrid?.GetHashCode() ?? 0) << 1)
+        long inputSig = (long)(startGrid?.GetHashCode() ?? 0)
+            ^ ((long)(goalGrid?.GetHashCode() ?? 0) << 1)
             ^ ((long)(_settings.AtlasHighlightTags?.Count ?? 0) << 20)
             ^ ((long)(_settings.AtlasArrowTags?.Count ?? 0) << 28)
-            ^ ((long)selCnt << 36)
+            ^ ((long)sel.Count << 36)
             ^ (_settings.AtlasDrawAll ? 1L << 44 : 0L);
         long sig = viewSig * 2654435761L ^ inputSig;
         if (_builtAtlasOnce && _atlas.AllTagsResolved && sig == _lastAtlasSig)
             return;   // view + inputs unchanged → marks/route stay frozen (off-screen arrows don't jitter)
         _lastAtlasSig = sig; _builtAtlasOnce = true;
-
-        HashSet<nint> sel; lock (_atlasLock) sel = new HashSet<nint>(_atlasSel);
 
         // One-time default: track + arrow every Citadel (high-value, usually off-screen) until the user
         // edits the rules from the dashboard. Boss is intentionally NOT defaulted (too common). Wait until
@@ -1421,31 +1654,33 @@ public sealed class RadarApp : IDisposable
             string? color = matched != null && _settings.AtlasHighlightColors.TryGetValue(matched, out var c) ? c : null;
             marks.Add(new AtlasMark(n.X, n.Y, isTracked, n.HasContent, n.Visited, n.Unlocked, n.Biome, n.IconType, label, color, isArrow));
         }
-        _atlasMarks = marks;
-        BuildAtlasRoute(nodes);
+        var (start, end, route) = BuildAtlasRoute(nodes, startGrid, goalGrid);
+        _atlasRender = new AtlasRender(true, marks, start, end, route);   // publish atomically
     }
 
     /// <summary>Resolve the F10 START/END grid coords to canvas-space (relPos) points for the markers, and —
     /// when both are set — A* through the connection graph for the route polyline. All keyed by grid coord,
     /// so the markers + route survive pan/zoom and tiles going off-screen (every canvas child is in
-    /// <paramref name="nodes"/>, so its relPos is available even when off-screen). Sets <see cref="_atlasStartPt"/>,
-    /// <see cref="_atlasEndPt"/>, <see cref="_atlasRoute"/>. Logs once when a freshly-set END produces (or
-    /// fails to produce) a path, so we can see whether the graph connected the two.</summary>
-    private void BuildAtlasRoute(IReadOnlyList<Poe2Atlas.AtlasNodeLive> nodes)
+    /// <paramref name="nodes"/>, so its relPos is available even when off-screen). Returns (startPt, endPt,
+    /// route) for the caller to fold into the published <see cref="AtlasRender"/>. Logs once when a freshly-set
+    /// END produces (or fails to produce) a path, so we can see whether the graph connected the two.</summary>
+    private (NumVec2? Start, NumVec2? End, List<NumVec2> Route) BuildAtlasRoute(
+        IReadOnlyList<Poe2Atlas.AtlasNodeLive> nodes, (int X, int Y)? startGrid, (int X, int Y)? goalGrid)
     {
-        _atlasRoute = new(); _atlasStartPt = null; _atlasEndPt = null;
-        if (nodes.Count == 0) return;
+        var route = new List<NumVec2>();
+        NumVec2? startPt = null, endPt = null;
+        if (nodes.Count == 0) return (null, null, route);
 
         var gridToRel = new Dictionary<(int, int), NumVec2>(nodes.Count);
         foreach (var n in nodes) gridToRel[n.Grid] = new NumVec2(n.X, n.Y);
 
-        if (_atlasStartGrid is { } s && gridToRel.TryGetValue(s, out var sp)) _atlasStartPt = sp;
-        if (_atlasGoalGrid is { } g && gridToRel.TryGetValue(g, out var gp)) _atlasEndPt = gp;
+        if (startGrid is { } s && gridToRel.TryGetValue(s, out var sp)) startPt = sp;
+        if (goalGrid is { } g && gridToRel.TryGetValue(g, out var gp)) endPt = gp;
 
-        if (_atlasStartGrid is { } start && _atlasGoalGrid is { } goal)
+        if (startGrid is { } start && goalGrid is { } goal)
         {
             var path = _atlas.FindPath(start, goal);
-            if (path != null) foreach (var p in path) if (gridToRel.TryGetValue(p, out var rp)) _atlasRoute.Add(rp);
+            if (path != null) foreach (var p in path) if (gridToRel.TryGetValue(p, out var rp)) route.Add(rp);
             // Log once per (start,goal) pair so we can see graph connectivity (or the lack of it).
             if (_loggedRoute != (start, goal))
             {
@@ -1454,6 +1689,7 @@ public sealed class RadarApp : IDisposable
             }
         }
         else _loggedRoute = null;
+        return (startPt, endPt, route);
     }
     private (( int, int) s, (int, int) g)? _loggedRoute;
 
@@ -1512,6 +1748,8 @@ public sealed class RadarApp : IDisposable
 
     public void Dispose()
     {
+        _shutdown = true;
+        _worldThread?.Join(1000);   // let the background world loop observe _shutdown and exit
         _modCatalog.Flush(); // persist any mods seen since the last debounced write
         _replanner.Dispose();
         _api.Dispose();
