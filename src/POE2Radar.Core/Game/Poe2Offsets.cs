@@ -62,7 +62,7 @@ public static class Poe2
     {
         public const int AreaInfoPtr      = 0x0A0;  // ✓ → AreaInfo; +0x00 → UTF-16 "Code\0Name\0" (Code validated 'G1_town')
         public const int LocalPlayer      = 0x5A0;  // ✓ → player Entity (value-scanned player matched here)
-        public const int ServerDataPtr    = 0x580;  // candidate (heap ptr just before the player slot)
+        public const int ServerDataPtr    = 0x580;  // ✓ → ServerData (gateway to player inventories; +0x20 here = LocalPlayer @ 0x5A0). Validated 2026-06-16 via the inventory chain.
         public const int AwakeEntities    = 0x6C0;  // ✓ StdMap of live entities (id→EntityPtr); validated size=378
         public const int SleepingEntities = 0x6D0;  // ✓ StdMap (validated size=58)
         public const int TerrainMetadata  = 0x8A0;  // ✓ TerrainStruct base (GH2's 0xD20 drifted)
@@ -183,7 +183,123 @@ public static class Poe2
         public const int Mods = 0x168;
         public const int ModElemStride = 0x20;
         public const int ModRecordPtr = 0x8;   // element + this → mod record pointer
-        public const int ModIdString = 0x0;    // record + this → UTF-16 mod id
+        public const int ModIdString = 0x0;    // record + this → POINTER to the UTF-16 mod id (always deref, even when 0)
+    }
+
+    /// <summary>WorldItem component — wraps a dropped item on the ground. ⚠ validated live 2026-06-12
+    /// (Research --item) on a dropped unique staff: the container entity is "Metadata/MiscellaneousObjects/
+    /// WorldItem"; its WorldItem component +0x28 points to the actual item entity (its own
+    /// EntityDetails/ComponentList, metadata "Metadata/Items/...").</summary>
+    public static class WorldItemComponent
+    {
+        public const int ItemEntity = 0x28; // ⚠ → inner item entity
+    }
+
+    /// <summary>RenderItem component (on the inner item entity) — the item's 2D art. ⚠ validated live
+    /// 2026-06-12: +0x28 is a pointer to the UTF-16 .dds resource path (e.g.
+    /// "Art/2DItems/Weapons/.../Uniques/Earthbound.dds"). The basename ("Earthbound") is the price-lookup
+    /// key — it matches poe2scout's IconUrl basename. NB: RenderItem also lists socketed-gem art at later
+    /// offsets, so take the FIRST entry (the item's own art).</summary>
+    public static class RenderItemComponent
+    {
+        public const int ResourcePath = 0x28; // ⚠ → UTF-16 .dds art path
+    }
+
+    /// <summary>Mods component (on items) — rarity lives at a DIFFERENT offset than ObjectMagicProperties.
+    /// ⚠ validated live 2026-06-12 on a dropped unique (read 3 = Unique). Matches GameHelper2's
+    /// ModsAndObjectMagicProperties (Rarity at the sub-struct's +0x94; for the item Mods component the
+    /// sub-struct is at +0x00, so rarity = +0x94). Enum 0=Normal,1=Magic,2=Rare,3=Unique.</summary>
+    public static class ModsComponent
+    {
+        public const int Rarity = 0x94;     // ✓ int (0=Normal,1=Magic,2=Rare,3=Unique)
+        public const int Identified = 0x90; // ✓ int — 1 = identified, 0 = unidentified. Validated live
+                                            // 2026-06-12 by diffing an identified unique (Earthbound=1) vs
+                                            // an unidentified one (Keelhaul=0) on the ground.
+        // Affix mod vectors — AllModsType (GH2) lives at the sub-struct's +0xA0, each a StdVector of
+        // ModArrayStruct (stride 0x40). A record's ModsPtr (+0x28) → Mods.dat row whose first qword →
+        // UTF-16 internal mod id ("UniqueGiantsBlood1"). ✓ validated live 2026-06-16 against the
+        // identified unique gloves "Treefingers Riveted Mitts" (read UniqueGiantsBlood1 + 5 more) and
+        // equipped rares/uniques (explicit + implicit ids matched the worn gear).
+        public const int ImplicitMods = 0xA0; // ✓ StdVector<ModArrayStruct>
+        public const int ExplicitMods = 0xB8; // ✓ StdVector<ModArrayStruct>
+        public const int EnchantMods  = 0xD0; // ✓ StdVector<ModArrayStruct>
+        public const int ModArrayStride = 0x40; // ✓ sizeof(ModArrayStruct)
+        public const int ModRecordPtr   = 0x28; // ✓ element + this → Mods.dat row
+        public const int ModRecordIdPtr = 0x00; // ✓ row's first qword → UTF-16 internal mod id
+    }
+
+    /// <summary>Stack component (on stackable items) — current stack count. ✓ validated live 2026-06-16
+    /// (currency/gem stacks in the player inventory read their true counts; matches GH2 StackOffsets).</summary>
+    public static class StackComponent
+    {
+        public const int Count = 0x18; // ✓ int — current stack size
+    }
+
+    /// <summary>Player inventory chain. ✓ validated live 2026-06-16 (--inventory): every inventory
+    /// (equipment + backpack + flasks + stash-style) resolved with correct box dimensions and items.
+    /// Chain: AreaInstance +0x580 → ServerData; ServerData +0x48 → StdVector PlayerServerData, [0] →
+    /// ServerDataStructure; ServerDataStructure +0x320 → StdVector PlayerInventories (InventoryArrayStruct,
+    /// stride 0x18). Each InventoryArrayStruct: +0x00 int InventoryId (Inventories.dat index: 1=Main,
+    /// 2=BodyArmour, 3=Weapon1, 5=Helm, 6=Amulet, 7/8=Rings, 9=Gloves, 10=Boots, 11=Belt, 12=Flask…),
+    /// +0x08 ptr InventoryStruct, +0x10 ptr (= +0x08 − 0x10, the fingerprint invariant).</summary>
+    public static class ServerData
+    {
+        public const int PlayerServerDataVec = 0x48;  // ✓ StdVector<IntPtr>; [0] → ServerDataStructure
+        public const int PlayerInventoriesVec = 0x320; // ✓ (on ServerDataStructure) StdVector<InventoryArrayStruct>
+        public const int InvArrayStride = 0x18;        // ✓ sizeof(InventoryArrayStruct)
+        public const int InvArrayId     = 0x00;        // ✓ int InventoryName index
+        public const int InvArrayPtr    = 0x08;        // ✓ → InventoryStruct
+    }
+
+    /// <summary>InventoryStruct — one grid inventory. ✓ validated live 2026-06-16. TotalBoxes (X,Y) at
+    /// +0x150; ItemList (StdVector of InventoryItemStruct pointers, length = X·Y) at +0x170.</summary>
+    public static class Inventory
+    {
+        public const int TotalBoxesX = 0x150; // ✓ int columns
+        public const int TotalBoxesY = 0x154; // ✓ int rows
+        public const int ItemListVec = 0x170; // ✓ StdVector<IntPtr→InventoryItemStruct>
+        public const int ServerRequestCounter = 0x1E8; // (GH2) int
+    }
+
+    /// <summary>InventoryItemStruct — links a grid slot to an item entity. ✓ validated live 2026-06-16.
+    /// Duplicate Item pointers across cells = a multi-cell item (de-dup by item address).</summary>
+    public static class InventoryItem
+    {
+        public const int Item      = 0x00; // ✓ → item Entity (ItemBase/ComponentList; meta "Metadata/Items/…")
+        public const int SlotStartX = 0x08; // ✓ int
+        public const int SlotStartY = 0x0C; // ✓ int
+        public const int SlotEndX   = 0x10; // ✓ int
+        public const int SlotEndY   = 0x14; // ✓ int
+    }
+
+    /// <summary>Sockets component (on socketable items) — socketed runes/soul-cores/gems as item-entity
+    /// pointers. ⚠ one observation 2026-06-16 (--itemdump on a rare body armour with 2 Lesser Life Runes):
+    /// owner back-ptr at +0x08 (ComponentHeader.EntityPtr); the two socketed RuneLifeLesser entities read
+    /// as consecutive inline pointers at +0x30 / +0x38. Whether that's a fixed inline array or a small-buffer
+    /// StdVector — and the empty-socket representation — needs cross-validation on items with other socket
+    /// counts (the lone +0x98 hit was likely an unrelated neighbour pointer).</summary>
+    public static class SocketsComponent
+    {
+        public const int Owner          = 0x08; // ComponentHeader.EntityPtr
+        public const int SocketedItems  = 0x30; // ⚠ first socketed item entity ptr (then +0x38, …)
+    }
+
+    /// <summary>Stats / LocalStats component — aggregated stat (key,value) pairs. ⚠ observed 2026-06-16.
+    /// A StatArrayStruct is {int statIndex; int value}; the vector of them was found at +0x20 on an item's
+    /// LocalStats component (read [131 = 18] = +18 local Energy Shield on the body armour). statIndex maps
+    /// 1:1 to GameHelper2's GameStats enum (value = Stats.dat row index + 1, e.g. 131 = local_energy_shield),
+    /// and that enum's ordering MATCHES our live build — so statIndex → stat-id string is solved via a ported
+    /// GameStats table. NB: only LOCAL stats live on an item; global mods (life/resist) only aggregate onto
+    /// the character's Stats component once equipped. GH2 chain for the character Stats component:
+    /// +0x160 → StatsStructInternal, Stats StdVector @ +0xF8 (StatArrayStruct stride 0x08).</summary>
+    public static class StatsComponent
+    {
+        public const int StatArrayStride = 0x08; // ✓ {int statIndex; int value}
+        // ⚠ item LocalStats: a {key,value} StdVector observed at component +0x20 (one entry). Character
+        // Stats: StatsChangedByItemsPtr @ +0x160 → StatsStructInternal; its Stats vec @ +0xF8 (GH2).
+        public const int ItemLocalStatsVec = 0x20;  // ⚠ (one observation)
+        public const int StatsChangedByItemsPtr = 0x160; // (GH2) → StatsStructInternal
+        public const int StatsStructStatsVec     = 0xF8;  // (GH2) StdVector<StatArrayStruct>
     }
 
     /// <summary>Chest component. ✓ OpenState @ +0x168 — the offset is stable, but the 2026-06-06 patch
@@ -315,14 +431,43 @@ public static class Poe2
         public const int Self           = 0x08;  // ✓ self pointer
         public const int Children       = 0x10;  // ✓ StdVector begin (child UiElement ptrs); End @ +0x18
         public const int ChildrenEnd    = 0x18;  // ✓ StdVector end
+        public const int PositionModifier = 0xF0; // StdTuple2D<float>; added to parent pos when Flags bit 0x0A set (GH2 UiElementBase)
         public const int Parent         = 0xB8;  // (community) parent UiElement; true UI root = *(UiRoot+0xB8)
         public const int RelativePos    = 0x118; // ✓ StdTuple2D<float> position relative to parent (varies per atlas node)
+        public const int LocalScaleMul  = 0x130; // float local scale multiplier (also the atlas zoom on node elements)
         public const int Flags          = 0x180; // ✓ uint; IsVisibleLocal = bit 0x0B (toggle-diff: 0x2EF1↔0x26F1)
         public const int FlagVisibleBit = 0x0B;  // ✓ visible bit (set when shown)
+        public const int FlagModifyPosBit = 0x0A; // when set, PositionModifier (+0xF0) is added to the parent pos
+        public const int ScaleIndex     = 0x18A; // byte; selects which axis scale(s) apply (1=v1,2=v2,3=v1×v2). root=3
+        public const int Text           = 0x390; // std::wstring of the element's displayed text (font name @ +0xC8).
+                                                  // Validated live 2026-06-14: every text element (loot tags, skill
+                                                  // rows, runeforge rows) holds its UTF-16 string here.
         public const int SizeW          = 0x288; // ✓ float unscaled width  (atlas node = 40)
         public const int SizeH          = 0x28C; // ✓ float unscaled height (atlas node = 40)
         // Full visibility is hierarchical: an element is shown iff its own bit 0x0B AND every
         // ancestor's bit are set. Walk Parent (+0xB8) up to the root.
+        // Screen geometry (GH2 UiElementBaseFuncs): v1 = winW/2560, v2 = winH/1600 (BaseResolution
+        // 2560×1600). ScaleValue(ScaleIndex, LocalScaleMul): idx1→(v1,v1) idx2→(v2,v2) idx3→(v1,v2),
+        // else (mul,mul). screenPos = unscaledParentChainPos × ScaleValue; screenSize = UnscaledSize × ScaleValue.
+        public const double BaseResW = 2560.0;
+        public const double BaseResH = 1600.0;
+    }
+
+    /// <summary>"Runeshape Combinations" reward panel (rune-crafting league mechanic). The panel is found
+    /// by a UI-FLAGS-FINGERPRINT walk with backtracking from GameUi (= <see cref="InGameState.UiRoot"/>,
+    /// the UiRootStruct the game treats as a UiElement) — child indices drift per patch/restart, the Flags
+    /// "role" bits don't. Each fingerprint is matched with the visible bit (0x800) masked out; step 0
+    /// (window-container) must be VISIBLE = panel open. Validated live 2026-06-14 (Research --runeforge);
+    /// re-validate per patch (the probe prints GameUi child flags on resolve-fail for re-fingerprinting).</summary>
+    public static class Runeforge
+    {
+        // window-container (gate) → … → recipes-container. (visible bit masked out before compare.)
+        public static readonly uint[] PanelFlagFingerprints =
+            { 0x00462EF1, 0x00502EF3, 0x00502EF7, 0x00542EF1, 0x00502EF1 };
+        public const int GateStep = 0;       // the window-container; its visible bit gates panel-open
+        public const int ViewportStep = 2;   // this hop's element holds the scroll offset (+0x120)
+        public const int ScrollOffset = 0x120; // StdTuple2D<float> viewport scroll offset
+        public const int NameWString = 0x390;  // visible row's kid[0]: inline std::wstring "<count>x <name>"
     }
 
     /// <summary>Atlas map-node UiElement (a subclass with its own vtable; ~1200+ instances live in the
@@ -339,6 +484,15 @@ public static class Poe2
     /// <c>POE2Radar.Research --atlas-probe</c> (Atlas map open) — it re-locates the class + canvas,
     /// validates every offset, and prints the derived projection. Only the node-class vtable drifts.
     /// See resources/atlas-research-notes.md "FULLY SOLVED".</para></summary>
+    /// <summary>The EndgameMaps row a node points at (node <see cref="AtlasNode.MapNodeId"/> +0x300 → row).
+    /// Its +0x00 → the WorldAreas row, whose +0x00 is the Id ("MapXxx") and +0x08 is the LOCALIZED display
+    /// name ("Savannah"/"Digsite"/"Precursor Tower"). ✓ validated live 2026-06-16 (Research --atlas-mapname);
+    /// reading +0x08 fixed web-UI filters where Prettify(code) mismatched the in-game name.</summary>
+    public static class AtlasMapRow
+    {
+        public const int WorldAreaName = 0x08; // ✓ WorldAreas row +0x08 → UTF-16 localized map name
+    }
+
     public static class AtlasNode
     {
         public const int MapNodeId   = 0x300; // ✓ u32 — distinct per node

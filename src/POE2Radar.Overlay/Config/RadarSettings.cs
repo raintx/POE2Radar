@@ -120,6 +120,9 @@ public sealed class RadarSettings
     // ── Walkable-terrain bitmap colors/transparency. Defaults reproduce the old hardcoded wash. ──
     public TerrainSettings Terrain { get; set; } = new();
 
+    // ── Ground-item value overlay (unique drops): name + price over the loot icon, border if above value. ──
+    public GroundItemSettings GroundItems { get; set; } = new();
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -326,6 +329,26 @@ public sealed class TerrainSettings
 }
 
 /// <summary>
+/// Ground-item value overlay: draws a dropped UNIQUE's resolved name + Exalted price over its in-world
+/// loot icon (so unidentified uniques reveal what they are), with a border when the value clears
+/// <see cref="HighlightMinEx"/>. Prices come from the PriceBook (poe.ninja). <see cref="League"/> blank =
+/// auto-detect the current league; set it to override. <see cref="MinQuantity"/> filters low-volume
+/// mislistings out of the overlay.
+/// </summary>
+public sealed class GroundItemSettings
+{
+    public bool Enabled { get; set; } = true;
+    public double HighlightMinEx { get; set; } = 10.0;   // border when value ≥ this many Exalted
+    public double UniqueMinEx { get; set; } = 5.0;       // only label uniques worth ≥ this many Exalted (the
+                                                         // ground overlay now shows ONLY unidentified uniques)
+    public int MinQuantity { get; set; } = 2;            // skip listings with fewer than N for sale (confidence)
+    public string League { get; set; } = "";             // blank = auto-detect current league
+    // Which item-value categories get a ground label. Group keys map to poe2scout categories (see
+    // RadarApp.CategoryGroup). Default: uniques + the common stackables. Empty list ⇒ nothing shows.
+    public List<string> Categories { get; set; } = new() { "Uniques", "Runes", "Essences", "Currency" };
+}
+
+/// <summary>
 /// The full radar icon style table. Every default mirrors the formerly hardcoded values in
 /// <c>OverlayRenderer</c>, so a missing/partial config renders identically to before.
 /// </summary>
@@ -368,6 +391,9 @@ public sealed class RadarStyles
         // "StrongBoxes" hits the real boxes (BasicStrongboxLow lives under it) but not those.
         new() { Name = "Strongbox",  Match = new() { "StrongBoxes" }, Categories = new() { "Chest" }, Shape = "Square", Color = "#FFB300", Opacity = 1f, Size = 6f },
         new() { Name = "Essence",    Match = new() { "Essence" },                           Shape = "Triangle", Color = "#33E0FF", Opacity = 1f, Size = 7f },
-        new() { Name = "Shrine",     Match = new() { "Shrine" },                            Shape = "Star",     Color = "#7DFF7D", Opacity = 1f, Size = 6f },
+        // Match the real shrine namespace ONLY (Metadata/Shrines/Shrine_Trigger). A bare "Shrine" substring
+        // false-positives on terrain cosmetics/spawners (GoblinShrineCosmetic, GoblinShrineSpawnerLeap) and
+        // the ShrineFireDaemon effect carrier — none of which are the clickable shrine mechanic.
+        new() { Name = "Shrine",     Match = new() { "Metadata/Shrines/" },                  Shape = "Star",     Color = "#7DFF7D", Opacity = 1f, Size = 6f },
     };
 }

@@ -26,12 +26,16 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, nint> _iconAddr = new();     // entity → MinimapIcon component (0 = none); game POI
     private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
     private readonly Dictionary<nint, string[]> _mods = new();     // entity → affix mod ids (static per spawn; cached; empty = no mods)
+    private readonly Dictionary<nint, (Rarity rarity, string? art, bool identified)> _itemIdent = new(); // WorldItem entity → dropped-item identity (static; cached)
     private readonly Dictionary<nint, uint> _idAt = new();         // entity address → last-seen std::map key id (recycle guard)
     // Bounds the number of NEW (uncached) monster mod reads per Entities() pass so walking into a large
     // pack can't stall the world tick. Cached monsters cost nothing; new ones fill over a few ticks.
     private int _modReadBudget;
     private const int ModReadBudgetPerPass = 16;
     private readonly byte[] _modVecBuf = new byte[24]; // one StdVector (First/Last/End)
+    // Same budgeting for the (cheap, read-once) dropped-item identity reads.
+    private int _itemReadBudget;
+    private const int ItemReadBudgetPerPass = 12;
     private nint _entCacheKey;   // AreaInstance address the entity caches were built for
 
     // Reused across Entities() calls (tick thread only) to avoid per-tick allocations. The std::map
@@ -57,11 +61,17 @@ public sealed class Poe2Live
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, Vector3 World, EntityCategory Category, string Metadata,
         int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false,
-        IReadOnlyList<string>? Mods = null)
+        IReadOnlyList<string>? Mods = null, string? ItemArt = null, bool ItemIdentified = true)
     {
+        // ItemIdentified (positional): for a dropped unique, whether the game has identified it (Mods+0x90).
+        // Drives the loot overlay's unique rule — unID → reveal the resolved name; ID → value only. Defaults
+        // true so non-item / non-unique entities are never treated as "unidentified".
         /// <summary>The monster's affix mod ids (auras/buffs), never null. Empty for non-monsters,
         /// unrolled monsters, or before the budgeted mod read has filled this entity in.</summary>
         public IReadOnlyList<string> ModList => Mods ?? Array.Empty<string>();
+        // ItemArt (positional): for a dropped-item (WorldItem) entity, the basename of its 2D art (.dds),
+        // e.g. "Earthbound" — the price-lookup key (matches poe2scout IconUrl basename). Null for non-items
+        // / not-yet-read. When set, Rarity carries the dropped item's rarity (Unique=3) for gating.
 
         /// <summary>Monsters are "alive" only with positive HP; non-life entities are always shown.</summary>
         public bool IsAlive => HpMax <= 0 || HpCur > 0;
@@ -165,6 +175,12 @@ public sealed class Poe2Live
 
     /// <summary>Player grid position (from the Render component's world position ÷ grid ratio).</summary>
     public System.Numerics.Vector2? PlayerGrid(nint localPlayer) => EntityGrid(localPlayer);
+
+    /// <summary>Player world position (the Render component's CurrentWorldPosition, incl. Z). RENDER-RATE
+    /// safe — resolves + caches the player's Render component on demand (same path as <see cref="PlayerGrid"/>),
+    /// so the render thread can anchor the guidance line at the player's live feet without the local player
+    /// needing to be in the (world-rate) entity list.</summary>
+    public Vector3? PlayerWorld(nint localPlayer) => EntityWorld(localPlayer);
 
     public readonly record struct Vitals(int HpCur, int HpUnreserved, int ManaCur, int ManaUnreserved,
         int EsCur, int EsUnreserved)
@@ -299,7 +315,7 @@ public sealed class Poe2Live
         if (areaInstance != _entCacheKey)
         {
             _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear(); _chestAddr.Clear();
-            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _mods.Clear(); _idAt.Clear();
+            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _mods.Clear(); _itemIdent.Clear(); _idAt.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -312,6 +328,7 @@ public sealed class Poe2Live
         _entQueue.Clear(); _entQueue.Enqueue(root);
         _entVisited.Clear();
         _modReadBudget = ModReadBudgetPerPass;
+        _itemReadBudget = ItemReadBudgetPerPass;
         while (_entQueue.Count > 0 && _entVisited.Count < 200000)
         {
             var node = _entQueue.Dequeue();
@@ -350,10 +367,17 @@ public sealed class Poe2Live
             if (cat is EntityCategory.Monster or EntityCategory.Chest) rarity = ReadRarity(entity);
             if (cat == EntityCategory.Chest) opened = ReadChestOpened(entity);
             var mods = cat == EntityCategory.Monster ? ReadMods(entity) : null;
+            var meta = _meta.GetValueOrDefault(entity, "");
+            // Dropped items (WorldItem containers, categorized Other) carry a price-lookup identity: art
+            // basename + rarity, read once off the inner item entity. Rarity then reflects the item.
+            string? itemArt = null;
+            var itemIdentified = true;
+            if (cat == EntityCategory.Other && meta.Contains("WorldItem", StringComparison.Ordinal))
+                (rarity, itemArt, itemIdentified) = ReadItemIdentity(entity);
 
             var (poi, iconComplete) = ReadIcon(entity);
-            dots.Add(new EntityDot(id, entity, g, wv, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax,
-                poi, ReadReaction(entity), rarity, opened, iconComplete, mods));
+            dots.Add(new EntityDot(id, entity, g, wv, cat, meta, hpCur, hpMax,
+                poi, ReadReaction(entity), rarity, opened, iconComplete, mods, itemArt, itemIdentified));
         }
         return dots;
     }
@@ -364,7 +388,7 @@ public sealed class Poe2Live
     {
         _renderAddr.Remove(entity); _lifeAddr.Remove(entity); _posAddr.Remove(entity);
         _ompAddr.Remove(entity); _chestAddr.Remove(entity); _category.Remove(entity);
-        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity); _mods.Remove(entity);
+        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity); _mods.Remove(entity); _itemIdent.Remove(entity);
     }
 
     /// <summary>
@@ -445,7 +469,10 @@ public sealed class Poe2Live
         {
             var rec = Ptr(first + (nint)(i * stride + Poe2.ObjectMagicProperties.ModRecordPtr));
             if (rec == 0) continue;
-            var idPtr = Poe2.ObjectMagicProperties.ModIdString == 0 ? rec : Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
+            // record's +ModIdString qword is a POINTER to the UTF-16 mod id (not the string inline) — must
+            // deref even when the offset is 0 (Ptr(rec+0) = *rec). Skipping this deref read the record
+            // pointer's own bytes as text → garbage → every monster cached as "no mods".
+            var idPtr = Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
             if (idPtr == 0) continue;
             var s = _reader.ReadStringUtf16(idPtr, 64);
             if (LooksLikeModId(s) && !list.Contains(s)) list.Add(s);
@@ -453,6 +480,68 @@ public sealed class Poe2Live
         var arr = list.Count == 0 ? Array.Empty<string>() : list.ToArray();
         _mods[entity] = arr;
         return arr.Length == 0 ? null : arr;
+    }
+
+    /// <summary>
+    /// Resolve a dropped item's identity for price lookup: unwrap the WorldItem container → inner item
+    /// entity, read its rarity (Mods+0x94) and 2D-art basename (RenderItem+0x28 → UTF-16 .dds path). Like
+    /// other item facts these are fixed once dropped, so the result is cached per entity and read at most
+    /// once; new reads are bounded per pass by <see cref="_itemReadBudget"/>. Returns (rarity, artBasename);
+    /// artBasename is null when the item can't be resolved.
+    /// </summary>
+    private (Rarity, string?, bool) ReadItemIdentity(nint entity)
+    {
+        if (_itemIdent.TryGetValue(entity, out var cached)) return cached;
+        if (_itemReadBudget <= 0) return (Rarity.NonMonster, null, true);   // out of budget — retry next tick (don't cache)
+
+        var wi = ResolveComponent(entity, "WorldItem");
+        var item = wi == 0 ? 0 : Ptr(wi + Poe2.WorldItemComponent.ItemEntity);
+        if (item == 0) { var v = (Rarity.NonMonster, (string?)null, true); _itemIdent[entity] = v; return v; }
+        _itemReadBudget--;
+
+        // Rarity (+0x94) + Identified (+0x90) from the item's Mods component (distinct from monster
+        // ObjectMagicProperties+0x144). Identified defaults true (non-uniques / no Mods comp aren't "unID").
+        var rarity = Rarity.NonMonster;
+        var identified = true;
+        var modsComp = ResolveComponent(item, "Mods");
+        if (modsComp != 0)
+        {
+            if (_reader.TryReadStruct<int>(modsComp + Poe2.ModsComponent.Rarity, out var r) && r is >= 0 and <= 3)
+                rarity = (Rarity)r;
+            if (_reader.TryReadStruct<int>(modsComp + Poe2.ModsComponent.Identified, out var idf))
+                identified = idf != 0;
+        }
+
+        // 2D-art .dds path → basename (the price key). RenderItem+0x28 is a pointer to the UTF-16 path.
+        string? art = null;
+        var renderItem = ResolveComponent(item, "RenderItem");
+        if (renderItem != 0)
+        {
+            var pathPtr = Ptr(renderItem + Poe2.RenderItemComponent.ResourcePath);
+            if (pathPtr != 0)
+            {
+                var full = _reader.ReadStringUtf16(pathPtr, 128);
+                art = ArtBasename(full);
+            }
+        }
+
+        var result = (rarity, art, identified);
+        _itemIdent[entity] = result;
+        return result;
+    }
+
+    /// <summary>"Art/2DItems/Weapons/.../Uniques/Earthbound.dds" → "Earthbound" (last path segment, no
+    /// extension). Returns null for empty/garbage so callers can ignore it.</summary>
+    private static string? ArtBasename(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        var slash = path.LastIndexOf('/');
+        var start = slash >= 0 ? slash + 1 : 0;
+        var dot = path.LastIndexOf('.');
+        var end = dot > start ? dot : path.Length;
+        if (end <= start) return null;
+        var name = path[start..end];
+        return name.Length >= 2 ? name : null;
     }
 
     /// <summary>A GGG mod id is a non-trivial identifier: letters/digits/underscore only, has a letter.</summary>
@@ -830,6 +919,30 @@ public sealed class Poe2Live
         if (!_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
         if (_lifeAddr.TryGetValue(entity, out var life) && life != 0
             && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
+        return true;
+    }
+
+    /// <summary>The Render + Life component addresses cached for <paramref name="entity"/> by the most
+    /// recent <see cref="Entities"/> walk (0 when not resolved). Lets the world thread CAPTURE these into
+    /// an HP-bar spec so the RENDER thread can read the bar's live pos/HP via <see cref="TryLiveBarAt"/>
+    /// on its OWN reader stack — no shared per-entity cache between threads. Returns false if no Render.</summary>
+    public bool TryBarComponents(nint entity, out nint render, out nint life)
+    {
+        render = _renderAddr.GetValueOrDefault(entity);
+        life = _lifeAddr.GetValueOrDefault(entity);
+        return render != 0;
+    }
+
+    /// <summary>RENDER-RATE bar read from EXPLICIT component addresses (captured off the world thread's
+    /// <see cref="Entities"/> walk via <see cref="TryBarComponents"/>), using THIS instance's reader +
+    /// resolved Health offset. Touches no per-entity cache, so a render-thread <see cref="Poe2Live"/> can
+    /// drive HP bars without sharing state with the world-thread instance. <paramref name="render"/> must
+    /// be non-zero. Returns false on a failed position read.</summary>
+    public bool TryLiveBarAt(nint render, nint life, out Vector3 world, out int hpCur, out int hpMax)
+    {
+        world = default; hpCur = 0; hpMax = 0;
+        if (render == 0 || !_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
+        if (life != 0 && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
         return true;
     }
 

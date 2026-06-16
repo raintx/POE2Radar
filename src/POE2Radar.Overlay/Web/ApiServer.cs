@@ -52,6 +52,8 @@ public sealed class ApiServer : IDisposable
     // Persistent catalog of every monster affix-mod id ever seen — the vocabulary the rule editor
     // browses to author a Mods matcher. Read-only provider supplied by RadarApp.
     private readonly Func<IReadOnlyList<string>> _knownMods;
+    // PriceBook status provider ({league, count, status, exPerDivine, exPerChaos}) for the dashboard.
+    private readonly Func<object>? _prices;
     // Atlas map-data provider (catalog + current-region map set). Read-only, computed on demand (it
     // scans memory + caches), returns a JSON-ready object. Null when atlas reading is unavailable.
     private readonly Func<object>? _atlas;
@@ -76,6 +78,7 @@ public sealed class ApiServer : IDisposable
         LandmarkStore landmarkStore,
         Func<IReadOnlyList<string>> tilesProvider,
         Func<IReadOnlyList<string>> knownModsProvider,
+        Func<object>? pricesProvider = null,
         Func<object>? atlasProvider = null,
         Action<IReadOnlyList<long>>? atlasSelect = null,
         Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? atlasHighlight = null,
@@ -96,6 +99,7 @@ public sealed class ApiServer : IDisposable
         _landmarkStore = landmarkStore;
         _tiles = tilesProvider;
         _knownMods = knownModsProvider;
+        _prices = pricesProvider;
         _listener.Prefixes.Add($"http://localhost:{port}/");
     }
 
@@ -115,7 +119,11 @@ public sealed class ApiServer : IDisposable
             try { ctx = _listener.GetContext(); }
             catch { return; } // listener stopped
             try { Handle(ctx); }
-            catch (Exception ex) { TryWrite(ctx, 500, JsonSerializer.Serialize(new { error = ex.Message }, Json)); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[ApiServer] Error handling {ctx.Request.RawUrl}: {ex.Message}");
+                Write(ctx, 500, "{\"error\":\"internal server error\"}");
+            }
         }
     }
 
@@ -125,17 +133,13 @@ public sealed class ApiServer : IDisposable
         var q = ctx.Request.QueryString;
         var s = _state();
 
-        if (!path.StartsWith("/api/") && path != "/state" && path != "/health" && path != "/entities" && path != "/landmarks")
+        if (path.StartsWith("/api/") || path == "/state" || path == "/health" || path == "/entities" || path == "/landmarks" || path == "/rules")
         {
-            ServeStaticFile(ctx, path);
-            return;
-        }
-
-        switch (path)
-        {
-            case "/health":
-                Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, inGame = s.InGame }, Json));
-                break;
+            switch (path)
+            {
+                case "/health":
+                    Write(ctx, 200, JsonSerializer.Serialize(new { ok = true, inGame = s.InGame }, Json));
+                    break;
 
             case "/state":
             {
@@ -148,19 +152,14 @@ public sealed class ApiServer : IDisposable
                     s.InGame, areaCode = s.AreaCode, areaHash = s.AreaHash, areaLevel = s.AreaLevel,
                     areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
                     areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
-                    areaSeconds = s.AreaSeconds,
-                    charName = s.CharName, charLevel = s.CharLevel, charClass = s.CharClass,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
-                    hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct,
-                    hpCur = s.HpCur, hpMax = s.HpMax,
-                    manaCur = s.ManaCur, manaMax = s.ManaMax,
-                    esCur = s.EsCur, esMax = s.EsMax,
-                    autoFlask = s.AutoFlask, flask = s.FlaskNote,
+                    hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
                     entityCount = s.Entities.Count,
                     poiCount = s.Entities.Count(e => e.Poi),
                     landmarkCount = s.Landmarks.Count,
                     counts,
+                    worldMs = s.WorldMs, renderMs = s.RenderMs,
                 }, Json));
                 break;
             }
@@ -208,7 +207,7 @@ public sealed class ApiServer : IDisposable
                         id = e.Id, addr = $"0x{e.Address:X}", category = e.Category.ToString(), metadata = e.Metadata,
                         name = EntityNameResolver.Shared.ResolveOrShorten(e.Metadata),
                         poi = e.Poi, iconComplete = e.IconComplete, opened = e.Opened, reaction = e.Reaction, friendly = e.IsFriendly, rarity = e.Rarity.ToString(),
-                        mods = e.ModList,
+                        mods = e.ModList, itemArt = e.ItemArt,
                         x = e.Grid.X, y = e.Grid.Y, hpCur = e.HpCur, hpMax = e.HpMax,
                         alive = e.HpMax <= 0 || e.HpCur > 0,
                         dist = (int)Dist(e.Grid, s.Player),
@@ -326,6 +325,11 @@ public sealed class ApiServer : IDisposable
                 Write(ctx, 200, JsonSerializer.Serialize(new { mods = _knownMods() }, Json));
                 break;
 
+            case "/api/prices":
+                // PriceBook status — league, loaded count, rates, last fetch (dashboard ground-item panel).
+                Write(ctx, 200, JsonSerializer.Serialize(_prices?.Invoke() ?? new { loaded = false, status = "pricing unavailable" }, Json));
+                break;
+
             case "/api/version":
                 // This build's version + latest known on GitHub + download URL (for the update banner).
                 Write(ctx, 200, JsonSerializer.Serialize(_version?.Invoke() ?? new { current = "?", latest = (string?)null, updateAvailable = false, url = "" }, Json));
@@ -440,6 +444,48 @@ public sealed class ApiServer : IDisposable
             default:
                 Write(ctx, 404, JsonSerializer.Serialize(new { error = "not found", path }, Json));
                 break;
+            }
+        }
+        else
+        {
+            ServeStaticFile(ctx, path);
+        }
+    }
+
+    private static void ServeStaticFile(HttpListenerContext ctx, string path)
+    {
+        try
+        {
+            if (path == "/") path = "/index.html";
+            var basePath = System.IO.Path.Combine(AppContext.BaseDirectory, "WebRoot");
+            var filePath = System.IO.Path.GetFullPath(System.IO.Path.Combine(basePath, path.TrimStart('/')));
+
+            if (!filePath.StartsWith(basePath) || !System.IO.File.Exists(filePath))
+            {
+                Write(ctx, 404, JsonSerializer.Serialize(new { error = "not found", path }, Json));
+                return;
+            }
+
+            var ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+            ctx.Response.ContentType = ext switch
+            {
+                ".html" => "text/html; charset=utf-8",
+                ".css" => "text/css; charset=utf-8",
+                ".js" => "application/javascript; charset=utf-8",
+                ".png" => "image/png",
+                ".json" => "application/json",
+                _ => "application/octet-stream"
+            };
+            ctx.Response.StatusCode = 200;
+            
+            var bytes = System.IO.File.ReadAllBytes(filePath);
+            ctx.Response.ContentLength64 = bytes.Length;
+            ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            ctx.Response.OutputStream.Close();
+        }
+        catch
+        {
+            Write(ctx, 500, JsonSerializer.Serialize(new { error = "internal server error" }, Json));
         }
     }
 
@@ -479,6 +525,7 @@ public sealed class ApiServer : IDisposable
         styles = _settings.Styles,   // per-item icon shapes/colors/sizes + mechanic overrides
         hpBars = _settings.HpBars,   // monster HP-bar geometry (width/height/offset)
         terrain = _settings.Terrain, // walkable-terrain bitmap colors/transparency
+        groundItems = _settings.GroundItems, // ground-item value overlay (enabled / highlight threshold / league)
     };
 
     /// <summary>Apply only whitelisted radar/visual keys from a posted JSON object; persists on change.</summary>
@@ -530,6 +577,9 @@ public sealed class ApiServer : IDisposable
                     break;
                 case "terrain" when p.Value.ValueKind == JsonValueKind.Object:
                     if (TryParseTerrain(p.Value, out var terrain)) { _settings.Terrain = terrain; applied.Add(p.Name); }
+                    break;
+                case "groundItems" when p.Value.ValueKind == JsonValueKind.Object:
+                    if (TryParseGroundItems(p.Value, out var gi)) { _settings.GroundItems = gi; applied.Add(p.Name); }
                     break;
                 // Anything else (apiPort, unknown keys) is ignored by design.
             }
@@ -634,6 +684,25 @@ public sealed class ApiServer : IDisposable
             parsed.InteriorOpacity = Math.Clamp(parsed.InteriorOpacity, 0f, 1f);
             parsed.EdgeOpacity = Math.Clamp(parsed.EdgeOpacity, 0f, 1f);
             t = parsed;
+            return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool TryParseGroundItems(JsonElement el, out GroundItemSettings g)
+    {
+        g = new GroundItemSettings();
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<GroundItemSettings>(el.GetRawText(), Json);
+            if (parsed == null) return false;
+            parsed.HighlightMinEx = Math.Max(0, parsed.HighlightMinEx);
+            parsed.UniqueMinEx = Math.Max(0, parsed.UniqueMinEx);
+            parsed.MinQuantity = Math.Clamp(parsed.MinQuantity, 0, 100000);
+            parsed.League = (parsed.League ?? "").Trim();
+            parsed.Categories = (parsed.Categories ?? new())
+                .Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.OrdinalIgnoreCase).Take(32).ToList();
+            g = parsed;
             return true;
         }
         catch (JsonException) { return false; }
@@ -850,53 +919,7 @@ public sealed class ApiServer : IDisposable
         ctx.Response.OutputStream.Close();
     }
 
-    private static void Write(HttpListenerContext ctx, int status, string text, string contentType)
-    {
-        var buf = Encoding.UTF8.GetBytes(text);
-        ctx.Response.StatusCode = status;
-        ctx.Response.ContentType = contentType;
-        ctx.Response.ContentLength64 = buf.Length;
-        ctx.Response.OutputStream.Write(buf);
-        ctx.Response.OutputStream.Close();
-    }
 
-    private void ServeStaticFile(HttpListenerContext ctx, string path)
-    {
-        if (path == "/") path = "/index.html";
-        var localPath = Path.Combine(AppContext.BaseDirectory, "WebRoot", path.TrimStart('/'));
-        if (!File.Exists(localPath))
-        {
-            Write(ctx, 404, "Not Found", "text/plain");
-            return;
-        }
-        var ext = Path.GetExtension(localPath).ToLowerInvariant();
-        var mime = ext switch {
-            ".html" => "text/html; charset=utf-8",
-            ".css" => "text/css",
-            ".js" => "application/javascript",
-            ".json" => "application/json",
-            ".png" => "image/png",
-            ".ico" => "image/x-icon",
-            _ => "application/octet-stream"
-        };
-        var bytes = File.ReadAllBytes(localPath);
-        ctx.Response.StatusCode = 200;
-        ctx.Response.ContentType = mime;
-        ctx.Response.ContentLength64 = bytes.Length;
-        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
-        ctx.Response.OutputStream.Close();
-    }
-
-    private static void WriteHtml(HttpListenerContext ctx, string html)
-    {
-        var bytes = Encoding.UTF8.GetBytes(html);
-        ctx.Response.StatusCode = 200;
-        ctx.Response.ContentType = "text/html; charset=utf-8";
-        ctx.Response.Headers["Cache-Control"] = "no-store";
-        ctx.Response.ContentLength64 = bytes.Length;
-        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
-        ctx.Response.OutputStream.Close();
-    }
 
     private static void TryWrite(HttpListenerContext ctx, int status, string body)
     {
@@ -935,10 +958,11 @@ public sealed record RadarState(
     string AreaCode,
     string CharName,
     int CharLevel,
-    string CharClass,
-    int AreaSeconds)
+    int AreaSeconds,
+    float WorldMs = 0,
+    float RenderMs = 0)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,
-            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, 100, 0, 0, 0, 0, 0, 0, false, "", "", "", 0, "", 0);
+            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, 100, 0, 0, 0, 0, 0, 0, false, "", "", "", 0, 0);
 }

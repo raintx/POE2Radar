@@ -15,11 +15,17 @@ namespace POE2Radar.Overlay.Navigation;
 public sealed class RouteTracker
 {
     // ── Trigger thresholds (grid cells / seconds). ──
-    private const double ReplanCooldownSec   = 1.0;   // min spacing between replans for this target
-    private const double StaleSec            = 8.0;   // force a refresh even if nothing else fired
-    private const float  OffPathCells        = 18f;   // perpendicular distance that counts as "off the path"
-    private const float  GoalMovedCells      = 8f;    // goal drift (entity targets move) that forces a replan
-    private const int    ForwardWindow       = 12;    // # of waypoints ahead we scan for cursor/off-path
+    // MinReplanSpacing is a small HARD anti-thrash floor, not a "wait this long" cooldown: any real
+    // trigger (off-path, goal moved, walking away) fires as soon as the floor clears, so the route
+    // stays current instead of lagging behind by up to a second. A replan never piles up regardless —
+    // the owner gates on ReplanInFlight, so effective cadence is bounded by A* completion time anyway.
+    private const double MinReplanSpacingSec = 0.30;  // hard floor between replans for this target
+    private const double StaleSec            = 2.5;   // periodic safety refresh even if nothing else fired
+    private const float  OffPathCells        = 16f;   // perpendicular distance that counts as "off the path"
+    private const float  GoalMovedCells      = 4f;    // goal drift (entity targets move) that forces a replan
+    private const float  MovedReplanCells    = 12f;   // replan after travelling this far from the last plan's start
+    private const float  ReachedCells        = 3f;    // within this of the next node = reached → consume it
+    private const int    ForwardWindow       = 24;    // # of waypoints ahead we scan for cursor/off-path
     private const double HeadingWindowSec    = 0.3;   // sliding window for the player's heading estimate
     private const float  HeadingMinCells     = 2f;    // ignore heading below this magnitude (standing still)
     private const float  NegativeProgressDot = -0.3f; // heading·toGoal below this = walking the wrong way
@@ -29,6 +35,7 @@ public sealed class RouteTracker
     private int _cursor;
     private DateTime _lastReplanUtc = DateTime.MinValue;
     private NumVec2 _lastGoal = new(float.MinValue, float.MinValue);
+    private NumVec2 _lastReplanStart = new(float.MinValue, float.MinValue); // player pos when the last plan was requested
 
     // Short heading history (recent player positions + capture times, ~HeadingWindowSec window).
     private readonly List<(NumVec2 pos, DateTime at)> _history = new();
@@ -41,9 +48,10 @@ public sealed class RouteTracker
         => _cursor <= 0 ? _waypoints : _waypoints.GetRange(_cursor, _waypoints.Count - _cursor);
 
     /// <summary>
-    /// CHEAP per-tick maintenance: project the player onto the path and advance the cursor past
-    /// waypoints already walked, scanning only a small forward window. Also records the player
-    /// position into the heading history (dropping samples older than the heading window). No A*.
+    /// CHEAP per-tick maintenance: project the player onto the path and advance the cursor to the NEXT
+    /// node ahead, so <see cref="CurrentPoints"/> begins at the waypoint we're walking TOWARD — never the
+    /// node already behind us (which made the first leg point backward). Also records the player position
+    /// into the heading history (dropping samples older than the heading window). No A*.
     /// </summary>
     public void Maintain(NumVec2 playerGrid)
     {
@@ -51,38 +59,37 @@ public sealed class RouteTracker
 
         if (_waypoints.Count == 0) return;
 
-        // Find the nearest forward segment within the window and snap the cursor to its far end so
-        // CurrentPoints starts near the player. We only ever move the cursor forward.
-        var bestDist = float.MaxValue;
-        var bestEnd = _cursor;
-        var last = Math.Min(_waypoints.Count - 1, _cursor + ForwardWindow);
-        for (var i = _cursor; i < last; i++)
+        // Advance the cursor PROGRESSIVELY (one node at a time, in order) — the cursor is the next node we
+        // are heading TO. Consume it only once we've reached it OR walked PAST it along the path direction,
+        // then look at the one after. Checking nodes sequentially (NOT a global "nearest segment in a
+        // window" search) is what stops a switchback that loops back near us from making the cursor jump
+        // ahead and collapse the route into a straight line through terrain. We never consume the goal.
+        while (_cursor < _waypoints.Count - 1)
         {
-            var a = ToVec(_waypoints[i]);
-            var b = ToVec(_waypoints[i + 1]);
-            var d = PointSegmentDistance(playerGrid, a, b);
-            if (d < bestDist) { bestDist = d; bestEnd = i; }
+            var a = ToVec(_waypoints[_cursor]);                 // node we're currently heading to
+            if (NumVec2.Distance(playerGrid, a) <= ReachedCells) { _cursor++; continue; }   // reached it
+            var ab = ToVec(_waypoints[_cursor + 1]) - a;        // direction toward the node after
+            if (ab.LengthSquared() > 1e-3f && NumVec2.Dot(playerGrid - a, ab) > 0f) { _cursor++; continue; } // walked past it
+            break;
         }
-
-        // Snap onto the chosen segment's start; if the player is essentially at/after the segment's
-        // far endpoint, consume it too. Cursor only advances.
-        if (bestEnd > _cursor) _cursor = bestEnd;
     }
 
     /// <summary>
-    /// Should we kick off a full background replan? True when the cooldown has elapsed AND any
-    /// trigger fires: off-path, negative progress (walking away), the goal moved, or staleness.
+    /// Should we kick off a full background replan? Gated only by the hard anti-thrash floor; past that,
+    /// any trigger fires immediately so the route never lags: empty path, the goal moved, off-path,
+    /// walking the wrong way, or the periodic staleness refresh.
     /// </summary>
     public bool ShouldReplan(NumVec2 playerGrid, NumVec2 currentGoalGrid)
     {
-        var now = DateTime.UtcNow;
-        if ((now - _lastReplanUtc).TotalSeconds < ReplanCooldownSec) return false;
+        var sinceReplan = (DateTime.UtcNow - _lastReplanUtc).TotalSeconds;
+        if (sinceReplan < MinReplanSpacingSec) return false;   // hard anti-thrash floor only
 
-        if ((now - _lastReplanUtc).TotalSeconds > StaleSec) return true;       // stale
-        if (GoalMoved(currentGoalGrid)) return true;                            // entity target drifted
-        if (_waypoints.Count == 0) return true;                                 // never planned / empty
-        if (OffPath(playerGrid)) return true;                                   // wandered off the line
-        if (NegativeProgress(playerGrid)) return true;                          // walking the wrong way
+        if (_waypoints.Count == 0) return true;                 // never planned / empty
+        if (GoalMoved(currentGoalGrid)) return true;            // entity target drifted
+        if (OffPath(playerGrid)) return true;                   // wandered off the line
+        if (NegativeProgress(playerGrid)) return true;          // walking the wrong way
+        if (MovedFar(playerGrid)) return true;                  // travelled far → re-anchor the path to us
+        if (sinceReplan > StaleSec) return true;                // periodic safety refresh
         return false;
     }
 
@@ -96,17 +103,24 @@ public sealed class RouteTracker
         ReplanInFlight = false;
     }
 
-    /// <summary>Mark this target as having a replan request in flight (stamps the cooldown clock).</summary>
-    public void MarkReplanRequested()
+    /// <summary>Mark this target as having a replan request in flight (stamps the cooldown clock + records
+    /// the player position the plan starts from, for the "travelled far" freshness trigger).</summary>
+    public void MarkReplanRequested(NumVec2 playerStart)
     {
         ReplanInFlight = true;
         _lastReplanUtc = DateTime.UtcNow;
+        _lastReplanStart = playerStart;
     }
 
     // ── Triggers ──────────────────────────────────────────────────────────────────────────────
 
     private bool GoalMoved(NumVec2 goal)
         => _lastGoal.X > float.MinValue && NumVec2.Distance(goal, _lastGoal) > GoalMovedCells;
+
+    // The player has travelled far enough from where the current plan started that re-planning from the
+    // live position keeps the route's first node sitting right on us (rather than drifting behind).
+    private bool MovedFar(NumVec2 playerGrid)
+        => _lastReplanStart.X > float.MinValue && NumVec2.Distance(playerGrid, _lastReplanStart) > MovedReplanCells;
 
     private bool OffPath(NumVec2 playerGrid)
     {

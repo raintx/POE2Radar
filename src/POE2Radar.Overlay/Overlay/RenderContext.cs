@@ -27,9 +27,25 @@ public readonly record struct SelectedPath(int ColorSlot, IReadOnlyList<(int x, 
 /// so the bar tracks the moving monster smoothly. The renderer just projects + fills.</summary>
 public readonly record struct HpBarTarget(Vector3 World, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
 
+/// <summary>A priced ground-item label drawn over the in-world loot icon. <see cref="World"/> is the
+/// dropped item's world position (projected via the camera matrix, like HP bars). <see cref="Name"/> is
+/// the resolved unique name (from the art→price map — shown even for UNIDENTIFIED items), <see cref="Value"/>
+/// the formatted price, and <see cref="Highlight"/> whether it's above the configured value threshold
+/// (→ border). Built at world rate in RadarApp; the renderer only projects + draws.</summary>
+/// <summary><see cref="ShowName"/> = draw the resolved item NAME above the value (with a backing panel) —
+/// used for UNIDENTIFIED uniques, whose name the game hides. When false (identified uniques, runes,
+/// essences, currency…) only the value is drawn in a compact chip. <see cref="Highlight"/> adds a border.</summary>
+public readonly record struct ItemLabel(Vector3 World, string Name, string Value, bool Highlight, bool ShowName);
+
 /// <summary>One atlas node to highlight. <see cref="X"/>/<see cref="Y"/> are the node's canvas-space
 /// RelativePos; the renderer projects them to screen via the atlas transform (scale + offset).</summary>
 public readonly record struct AtlasMark(float X, float Y, bool Selected, bool HasContent, bool Visited, bool Unlocked, int Biome, int IconType, string? Label = null, string? Color = null, bool Arrow = false);
+
+/// <summary>One priced reward row in the "Runeshape Combinations" panel. <see cref="X"/>/<see cref="Y"/>/
+/// <see cref="W"/>/<see cref="H"/> are the reward row's SCREEN rect (already scaled, from Poe2Runeforge);
+/// the renderer draws <see cref="Text"/> (e.g. "5.4 ex") in <see cref="Color"/> (packed 0xAARRGGBB) just
+/// outside the row's right edge. Built at world rate in RadarApp; the renderer only positions + draws.</summary>
+public readonly record struct RuneLabel(float X, float Y, float W, float H, string Text, uint Color);
 
 /// <summary>What the PoE2 renderer needs each frame. Built fresh by <see cref="RadarApp"/>.</summary>
 public sealed record RenderContext(
@@ -38,6 +54,10 @@ public sealed record RenderContext(
     int WindowWidth,
     int WindowHeight,
     NumVec2 PlayerGrid,
+    // Live (render-rate) player world position incl. Z; anchors the world-ground guidance line at the
+    // player's feet. Null when unavailable (not in game / read failed). NOT from the entity list (the
+    // local player is filtered out of that), so it's correct even when alive/dead state changes.
+    Vector3? PlayerWorld,
     Poe2Live.MapUi Map,
     IReadOnlyList<Poe2Live.EntityDot> Entities,
     IReadOnlyList<Poe2Live.Landmark> Landmarks,
@@ -73,9 +93,8 @@ public sealed record RenderContext(
     bool HpBarUnique,
     // Smoothed guidance route per selected target, each carrying its selection-order color slot.
     IReadOnlyList<SelectedPath> SelectedPaths,
-    // Predicate: is this navigation-target id currently selected? (drives the legend swatch/highlight).
-    Func<string, bool> IsSelected,
-    // Legend rows (one per unified navigation target) for the HUD panel; never null.
+    // Legend rows (one per unified navigation target) for the HUD panel; never null. Each row already
+    // carries its own IsSelected/ColorSlot (built at world rate), so the renderer never needs a predicate.
     IReadOnlyList<LegendEntry> Legend,
     // ── Collapsible "POE2Radar" navigation-menu widget (always drawn when Active+InGame). ──
     bool NavMenuExpanded,         // dropdown open?
@@ -88,6 +107,8 @@ public sealed record RenderContext(
     IReadOnlyList<HpBarTarget>? HpBarTargets,
     // Walkable-terrain bitmap colors/transparency (mirrored from RadarSettings).
     TerrainSettings TerrainStyle,
+    // Priced ground-item labels (unique drops) to draw over their in-world loot icons. Null/empty → none.
+    IReadOnlyList<ItemLabel>? ItemLabels = null,
     // ── Unified display-rule engine (Phase 1). Resolves an entity to the first matching display rule
     // (or null → not drawn); the rule says hide or how to draw (shape/color/size/label). Replaces the
     // watched/mechanic/category dot decision in DrawMap. Null only if not wired (defensive). ──
@@ -112,4 +133,6 @@ public sealed record RenderContext(
     // exists; AtlasRoute (≥2 pts) is the graph polyline, else the renderer draws a straight START→END line.
     NumVec2? AtlasStart = null,
     NumVec2? AtlasEnd = null,
-    IReadOnlyList<NumVec2>? AtlasRoute = null);
+    IReadOnlyList<NumVec2>? AtlasRoute = null,
+    // Priced "Runeshape Combinations" reward labels (screen-space; drawn whenever the panel is open).
+    IReadOnlyList<RuneLabel>? RuneLabels = null);

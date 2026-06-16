@@ -44,12 +44,28 @@ clearly gated — a personal QoL tool, not a headless bot.
 - `Game/GameStructs.cs` — blittable structs (`StdVector`, `Vector2/3`, `VitalStruct`).
 - `Game/AobScanner.cs` + `AobPatterns.cs` — pattern scan for the GameState global slot.
 - `Game/LifeValidator.cs` — value-scan to find the Life component by HP (Research `--hp`).
+- `Game/ItemModTranslator.cs` — renders item mods (internal mod id + rolled values read from memory) to
+  the game's English stat lines (e.g. `IncreasedLife5 [67]` → "+67 to maximum Life"). Two embedded RePoE
+  PoE2 tables (`poe2_mod_stats.json` mod→stat-ids, `poe2_stat_descriptions.json` GGG stat descriptions),
+  regenerated per patch via `resources/poe2-data/regenerate.py`. Validate with `--inventory --itemmods`.
 - `Pathfinding/MapProjection.cs` + `GridConstants.cs` — isometric grid→screen projection and the
   grid↔world scale (250/23 ≈ 10.87).
 
 **Overlay** (`src/POE2Radar.Overlay/`):
-- `RadarApp.cs` — tick loop. Render rate (~144 Hz): live player + render. World rate (~30 Hz):
-  refresh entities/terrain/landmarks. Publishes a `RadarState` for the API; runs auto-flask.
+- `RadarApp.cs` — **two threads** (the render thread is never blocked by the heavy walk):
+  - *Render loop* (`Tick`, ~`FpsCap` Hz): fast per-frame reads on its OWN reader stack (`_liveRender`) —
+    live player/vitals/camera/map + auto-flask + HP-bar live pos — then draws from the lock-free
+    published snapshots. Publishes `RadarState` for the API.
+  - *World loop* (`WorldLoop`→`WorldTick`, ~30 Hz, own thread + reader `_live`): the heavy entity/terrain/
+    landmark walk + mod catalog + HP-bar specs + item labels + atlas update + nav/route maintenance.
+    Publishes an immutable `WorldSnapshot` (+ a separate `AtlasRender` bundle) the render thread reads
+    lock-free (volatile reference swap, same idiom as `_state`).
+  - Three INDEPENDENT reader stacks over the one `ProcessHandle` (RPM is concurrency-safe; the per-instance
+    buffers/caches are NOT): `_live` (world), `_liveRender` (render), `_liveApi` (HTTP/tile scans). `_atlas`
+    is internally locked, so it's shared. HP-bar live reads carry the mob's Render/Life component addresses
+    in the spec (`Poe2Live.TryBarComponents`/`TryLiveBarAt`) so the render thread reads them with no shared
+    cache. The render thread gates drawing of snapshot data on `snap.AreaHash == liveAreaHash` (zone-load
+    guard). `/state` exposes `worldMs`/`renderMs` timers. Auto-flask STAYS on the render thread.
 - `Overlay/OverlayWindow.cs` — per-pixel-alpha layered window (`UpdateLayeredWindow`), tracks the
   game window. `Overlay/OverlayRenderer.cs` — Direct2D: terrain bitmap + entity dots + landmark
   markers + world-space HP bars + player blip + HUD. Drawn only when PoE2 is focused. Icon
@@ -70,7 +86,12 @@ clearly gated — a personal QoL tool, not a headless bot.
 (dump the local player's Life component — what the configured Health/Mana/ES offsets read + every
 valid VitalStruct in the component; the per-patch re-validation for the auto-flask pools), `--chain`,
 `--entity`, `--find`/`--find-entities`/`--find-terrain`/`--find-map`, `--tiles`, `--rarity`,
-`--info`, `--watch` (area-change logger), `--dump`, `--presence` (walk-stable before/after diff to
+`--info`, `--inventory` (player inventory + item structure: lists every inventory with box dims, dumps
+each item's slot/rarity/identified/art/stack/components, `--inv N` for one inventory by id, `--itemmods`
+for explicit/implicit mod ids + rolled values; self-validates the drift-prone vec hops) + `--itemdump
+<hexItemAddr>` (deep single-item probe: Mods rarity/identified + per-affix id/value + Mods.dat row scan,
+LocalStats statIndex→value, Sockets contents), `--watch` (area-change logger),
+`--dump`, `--presence` (walk-stable before/after diff to
 find a buffed scalar), `--devtree` (browser-based live memory/UI/entity explorer at
 `localhost:7778` — `DevTree/DevTreeServer.cs` + `DevTreeHtml.cs`; the PoE2 stand-in for ExileApi's
 DevTree), and `--atlas-probe` (one-shot ATLAS PROJECTION recovery/validation — run with the Atlas map
@@ -98,6 +119,13 @@ is rescaled by liveZoom/calibZoom each frame. See `resources/atlas-research-note
   `+0x230`; Player name `+0x1B0`, level `+0x204`.
 - Map UI: UiRoot `InGameState +0x2F0`; UiElement Self `+0x08`, Children `+0x10`, Flags `+0x180`
   (visible = bit `0x0B`); MapUiElement Shift `+0x368`, DefaultShift `+0x370` (= (0,-20)), Zoom `+0x3A8`.
+- Inventory (✓ live, Research `--inventory`): `AreaInstance +0x580` → ServerData → `+0x48` PlayerServerData
+  vec `[0]` → ServerDataStructure → `+0x320` PlayerInventories vec (InventoryArrayStruct stride `0x18`:
+  `+0x00` id, `+0x08` → InventoryStruct, `+0x10` = ptr−0x10 fingerprint). InventoryStruct: TotalBoxes(X,Y)
+  `+0x150`, ItemList vec(ptr→InventoryItemStruct, len X·Y) `+0x170`. InventoryItemStruct: Item entity
+  `+0x00`, Slot `+0x08`. Item = Entity; Mods rarity `+0x94`/identified `+0x90`, affix vecs Implicit `+0xA0`/
+  Explicit `+0xB8`/Enchant `+0xD0` (ModArrayStruct stride `0x40`, `+0x28` → Mods.dat row → first qword →
+  UTF-16 internal mod id); Stack count `+0x18`; RenderItem art `+0x28`.
 - **Still TBD:** camera world→screen matrix (for world-space nameplates); friendly area Name string.
 
 ## Dependencies

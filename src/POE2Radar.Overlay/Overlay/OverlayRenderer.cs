@@ -110,6 +110,7 @@ public sealed class OverlayRenderer : IDisposable
             else if (ctx.Active && ctx.InGame)
             {
                 DrawNameplates(rt, ctx);                   // world-space HP bars over hostile mobs
+                DrawItemLabels(rt, ctx);                   // priced unique drops over their loot icons
                 if (ctx.Map.IsVisible)
                     DrawMap(rt, ctx);                      // terrain + dots + on-map path polylines
                 else
@@ -123,6 +124,11 @@ public sealed class OverlayRenderer : IDisposable
             {
                 _legendRowRects.Clear(); // not active/in-game: no stale click rects
             }
+
+            // Rune-crafting reward prices: screen-space labels drawn on top of whatever's below (radar
+            // or atlas), gated only on the panel being open (RuneLabels populated). No-op otherwise.
+            if (ctx.Active && ctx.InGame)
+                DrawRuneforge(rt, ctx);
         }
         finally { rt.EndDraw(); }
         _window.Present();
@@ -302,6 +308,79 @@ public sealed class OverlayRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Priced unique ground-item labels drawn over their in-world loot icons (projected via the camera
+    /// WorldToScreen matrix, same as HP bars). Each label shows the resolved unique NAME (revealing
+    /// unidentified uniques) + value on a backing panel; items above the value threshold get a gold
+    /// border. Drawn whether the big map is open or not — it's a heads-up loot overlay.
+    /// </summary>
+    private void DrawItemLabels(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (ctx.CameraMatrix is not { } m || ctx.ItemLabels is not { Count: > 0 } labels) return;
+        float W = ctx.WindowWidth, H = ctx.WindowHeight;
+        foreach (var it in labels)
+        {
+            var w = it.World;
+            var cw = w.X*m[3] + w.Y*m[7] + w.Z*m[11] + m[15];
+            if (cw <= 0.0001f) continue;                       // behind the camera
+            var cx = w.X*m[0] + w.Y*m[4] + w.Z*m[8] + m[12];
+            var cy = w.X*m[1] + w.Y*m[5] + w.Z*m[9] + m[13];
+            var sx = (cx/cw/2f + 0.5f) * W;
+            var sy = (0.5f - cy/cw/2f) * H;
+            if (sx < 0 || sx > W || sy < 0 || sy > H) continue;
+
+            if (it.ShowName)
+            {
+                // UNIDENTIFIED unique: two stacked lines — resolved NAME over VALUE — on a backing panel
+                // (the game hides the unID name, so we reveal it). Border when high-value.
+                var text = $"{it.Name}\n{it.Value}";
+                var halfW = MathF.Max(48f, 4.5f * MathF.Max(it.Name.Length, it.Value.Length + 3));
+                const float halfH = 19f;
+                var panel = new Vortice.RawRectF(sx - halfW, sy - halfH, sx + halfW, sy + halfH);
+                rt.FillRectangle(panel, _bPanel!);
+                if (it.Highlight) { _bStyle!.Color = ColItemHi; rt.DrawRectangle(panel, _bStyle, 2.5f); }
+                _bStyle!.Color = it.Highlight ? ColItemHi : ColItemText;
+                rt.DrawText(text, _tf!, new Rect(sx - halfW + 4f, sy - halfH + 2f, sx + halfW - 2f, sy + halfH - 1f),
+                    _bStyle, DrawTextOptions.Clip);
+            }
+            else
+            {
+                // Identified uniques + runes/essences/currency/…: VALUE-only compact chip (the game already
+                // shows the item's name on its loot tag). Border when high-value.
+                var halfW = MathF.Max(26f, 4.5f * (it.Value.Length + 1));
+                const float halfH = 11f;
+                var panel = new Vortice.RawRectF(sx - halfW, sy - halfH, sx + halfW, sy + halfH);
+                rt.FillRectangle(panel, _bPanel!);
+                if (it.Highlight) { _bStyle!.Color = ColItemHi; rt.DrawRectangle(panel, _bStyle, 2f); }
+                _bStyle!.Color = it.Highlight ? ColItemHi : ColItemText;
+                rt.DrawText(it.Value, _tf!, new Rect(sx - halfW + 3f, sy - halfH + 1f, sx + halfW - 2f, sy + halfH),
+                    _bStyle, DrawTextOptions.Clip);
+            }
+        }
+    }
+
+    private static readonly Color4 ColItemHi   = new(1.00f, 0.80f, 0.20f, 1.0f);  // gold — above-threshold name + border
+    private static readonly Color4 ColItemText = new(0.92f, 0.92f, 0.92f, 1.0f);  // off-white — below-threshold label
+
+    /// <summary>Rune-crafting reward prices: a small value box just outside the right edge of each visible
+    /// reward row in the "Runeshape Combinations" panel. Rects are screen-space (already scaled in
+    /// Poe2Runeforge); text + tier color are precomputed in RadarApp. Screen-space, so no world projection.</summary>
+    private void DrawRuneforge(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (ctx.RuneLabels is not { Count: > 0 } labels) return;
+        const float gap = 8f, boxW = 96f, boxH = 22f;
+        foreach (var r in labels)
+        {
+            var lx = r.X + r.W + gap;             // just past the row's right edge
+            var cy = r.Y + r.H * 0.5f;            // vertically centered on the row
+            var box = new Vortice.RawRectF(lx, cy - boxH * 0.5f, lx + boxW, cy + boxH * 0.5f);
+            rt.FillRectangle(box, _bPanel!);
+            _bStyle!.Color = ColorFromU(r.Color);
+            rt.DrawText(r.Text, _tf!, new Rect(lx + 5f, cy - boxH * 0.5f + 2f, lx + boxW - 2f, cy + boxH * 0.5f - 1f),
+                _bStyle, DrawTextOptions.Clip);
+        }
+    }
+
     /// <summary>Unpack a 0xAARRGGBB color (precomputed in RadarApp.BuildHpSpecs) to a Color4 — no string
     /// parse or allocation, runs per bar per frame.</summary>
     private static Color4 ColorFromU(uint u)
@@ -320,25 +399,34 @@ public sealed class OverlayRenderer : IDisposable
         if (ctx.CameraMatrix is not { } m || ctx.SelectedPaths.Count == 0) return;
         float W = ctx.WindowWidth, H = ctx.WindowHeight;
 
-        // Ground plane height = the player entity's world Z (paths sit at the player's feet).
-        var z = 0f;
-        foreach (var e in ctx.Entities)
-            if (e.Category == Poe2Live.EntityCategory.Player) { z = e.World.Z; break; }
+        // Ground plane height = the LIVE player feet Z (read this frame, not from the world-rate entity
+        // list — the local player is filtered out of that). Paths sit at the player's feet.
+        var z = ctx.PlayerWorld?.Z ?? 0f;
+
+        // Project a ground-plane world point to screen; null when it's behind the camera.
+        NumVec2? Proj(float wx, float wy)
+        {
+            var cw = wx * m[3] + wy * m[7] + z * m[11] + m[15];
+            if (cw <= 0.0001f) return null;
+            var cxp = wx * m[0] + wy * m[4] + z * m[8] + m[12];
+            var cyp = wx * m[1] + wy * m[5] + z * m[9] + m[13];
+            return new NumVec2((cxp / cw / 2f + 0.5f) * W, (0.5f - cyp / cw / 2f) * H);
+        }
+
+        // The line head is pinned to the player's LIVE world position every frame, so the first segment is
+        // always (you → next waypoint) and tracks you smoothly between world-rate path updates.
+        NumVec2? anchor = ctx.PlayerWorld is { } pw ? Proj(pw.X, pw.Y) : null;
 
         foreach (var path in ctx.SelectedPaths)
         {
             if (path.Points.Count == 0) continue;
             _bPath!.Color = PathColor(path.ColorSlot);
 
-            NumVec2? prev = null;
+            NumVec2? prev = anchor;
             foreach (var (gx, gy) in path.Points)
             {
                 float wx = gx * GridConstants.GridToWorld, wy = gy * GridConstants.GridToWorld;
-                var cw = wx * m[3] + wy * m[7] + z * m[11] + m[15];
-                if (cw <= 0.0001f) { prev = null; continue; } // waypoint behind camera — break the line
-                var cxp = wx * m[0] + wy * m[4] + z * m[8] + m[12];
-                var cyp = wx * m[1] + wy * m[5] + z * m[9] + m[13];
-                var p = new NumVec2((cxp / cw / 2f + 0.5f) * W, (0.5f - cyp / cw / 2f) * H);
+                if (Proj(wx, wy) is not { } p) { prev = null; continue; } // waypoint behind camera — break the line
                 if (prev is { } pr) rt.DrawLine(pr, p, _bPath, 3f);
                 rt.FillEllipse(new Ellipse(p, 4f, 4f), _bPath);
                 prev = p;
@@ -526,9 +614,11 @@ public sealed class OverlayRenderer : IDisposable
     {
         foreach (var path in ctx.SelectedPaths)
         {
-            if (path.Points.Count < 2) continue;
+            if (path.Points.Count < 1) continue;
             _bPath!.Color = PathColor(path.ColorSlot);
-            NumVec2? prev = null;
+            // Anchor the line head at the live player marker (center) so the route stays attached to the
+            // player every frame, even between world-rate cursor updates / replans.
+            NumVec2? prev = center;
             foreach (var (gx, gy) in path.Points)
             {
                 var p = Project(new NumVec2(gx, gy), player, center, scale);
