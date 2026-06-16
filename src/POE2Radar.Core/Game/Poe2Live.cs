@@ -469,7 +469,10 @@ public sealed class Poe2Live
         {
             var rec = Ptr(first + (nint)(i * stride + Poe2.ObjectMagicProperties.ModRecordPtr));
             if (rec == 0) continue;
-            var idPtr = Poe2.ObjectMagicProperties.ModIdString == 0 ? rec : Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
+            // record's +ModIdString qword is a POINTER to the UTF-16 mod id (not the string inline) — must
+            // deref even when the offset is 0 (Ptr(rec+0) = *rec). Skipping this deref read the record
+            // pointer's own bytes as text → garbage → every monster cached as "no mods".
+            var idPtr = Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
             if (idPtr == 0) continue;
             var s = _reader.ReadStringUtf16(idPtr, 64);
             if (LooksLikeModId(s) && !list.Contains(s)) list.Add(s);

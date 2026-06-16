@@ -183,7 +183,7 @@ public static class Poe2
         public const int Mods = 0x168;
         public const int ModElemStride = 0x20;
         public const int ModRecordPtr = 0x8;   // element + this → mod record pointer
-        public const int ModIdString = 0x0;    // record + this → UTF-16 mod id
+        public const int ModIdString = 0x0;    // record + this → POINTER to the UTF-16 mod id (always deref, even when 0)
     }
 
     /// <summary>WorldItem component — wraps a dropped item on the ground. ⚠ validated live 2026-06-12

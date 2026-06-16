@@ -304,6 +304,8 @@ internal static class DashboardHtml
   .pickbadge{flex:none; font-size:9px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-dim); background:#0c0a07; border:1px solid var(--line); border-radius:8px; padding:2px 7px; min-width:58px; text-align:center}
   .pickbadge.tile{color:var(--poi); border-color:var(--poi)}
   .pickbadge.entity{color:var(--gold)}
+  .pickbadge.mod{color:#26d9c0; border-color:#1c9e8c}
+  .pickcount{flex:none; font-size:10px; color:var(--ink-dim); font-family:"Cinzel","Georgia",serif}
   .picknm{flex:none; font-weight:600; color:var(--ink); max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .picksub{flex:1; min-width:0; color:var(--ink-faint); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .pickrar{flex:none; font-size:10px; color:var(--rare)}
@@ -963,8 +965,9 @@ function renderDrules(){
 }
 $('#drAdd')?.addEventListener('click',()=>{ drules.push({enabled:true,name:'New rule',categories:[],match:[],shape:'Circle',color:'#ffd926',opacity:1,size:4,_open:true}); renderDrules(); saveDrules(); });
 
-/* ── Add-rule picker: browse the area's live ENTITIES + terrain TILE names, filter, click to seed a
-   rule (entity → entity rule by category; tile → Tile rule). Removes the guesswork of typing metadata. ── */
+/* ── Add-rule picker: browse the area's live ENTITIES + terrain TILE names + monster MODS, filter,
+   click to seed a rule (entity → entity rule by category; tile → Tile rule; mod → Monster rule whose
+   Mods matcher targets that affix id). Removes the guesswork of typing metadata/mod ids. ── */
 let _pickEl=null, _pickEnts=[], _pickTiles=[], _pickKind='all', _pickQ='';
 const lastSeg=s=>((s||'').split('/').pop()||'').replace(/@\d+$/,'').replace(/\.tdt$/i,'');
 function ensurePick(){
@@ -972,12 +975,12 @@ function ensurePick(){
   _pickEl=document.createElement('div'); _pickEl.id='pickPop';
   _pickEl.innerHTML=`<div class="pickbox">
     <div class="pickhead">
-      <input id="pickSearch" type="search" placeholder="filter by name / metadata / tile path…">
-      <span class="pickkinds"><button class="chip on" data-k="all">All</button><button class="chip" data-k="entity">Entities</button><button class="chip" data-k="tile">Tiles</button></span>
+      <input id="pickSearch" type="search" placeholder="filter by name / metadata / tile path / mod id…">
+      <span class="pickkinds"><button class="chip on" data-k="all">All</button><button class="chip" data-k="entity">Entities</button><button class="chip" data-k="tile">Tiles</button><button class="chip" data-k="mod">Mods</button></span>
       <button class="pickclose" title="close">✕</button>
     </div>
     <div class="picklist" id="pickList"></div>
-    <div class="pickfoot">Click a target to add a rule for it (opens expanded to refine). Entities seed an entity rule; tiles seed a Tile rule.</div>
+    <div class="pickfoot">Click a target to add a rule for it (opens expanded to refine). Entities seed an entity rule; tiles seed a Tile rule; mods seed a Monster rule matching that affix.</div>
   </div>`;
   document.body.appendChild(_pickEl);
   _pickEl.querySelector('.pickclose').onclick=()=>_pickEl.classList.remove('open');
@@ -995,33 +998,52 @@ async function openPicker(){
   try{ const t=await getJSON('/api/tiles'); _pickTiles=(t&&t.tiles)||[]; }catch(_){ _pickTiles=[]; }
   renderPick(); pop.querySelector('#pickSearch').focus();
 }
+/* Aggregate the live entities' affix-mod ids into distinct rows: one per mod id, with a carrier
+   count and a few example monster names — so you can see which auras/buffs are actually in the zone
+   right now and pick one to track. (Each entity lists a mod id at most once, so count = #monsters.) */
+function pickMods(){
+  const map=new Map(); // modId -> {count, names:Set}
+  _pickEnts.forEach(e=>{ (e.mods||[]).forEach(m=>{ if(!m)return; let v=map.get(m); if(!v){v={count:0,names:new Set()}; map.set(m,v);} v.count++; const nm=e.name||lastSeg(e.metadata); if(nm) v.names.add(nm); }); });
+  return [...map.entries()].sort((a,b)=>b[1].count-a[1].count).map(([m,v])=>({
+    kind:'mod', cat:'Mod', name:m, modId:m, count:v.count,
+    sub:[...v.names].slice(0,4).join(', ')||'monster affix',
+  }));
+}
 function pickItems(){
   const q=_pickQ, out=[];
-  if(_pickKind!=='tile'){
+  if(_pickKind==='all'||_pickKind==='entity'){
     const seen=new Set();
     _pickEnts.forEach(e=>{ const k=e.category+'|'+e.metadata; if(seen.has(k))return; seen.add(k);
       if(q && !((e.metadata||'').toLowerCase().includes(q)||(e.name||'').toLowerCase().includes(q)||(e.category||'').toLowerCase().includes(q)))return;
       out.push({kind:'entity',cat:e.category,name:e.name||lastSeg(e.metadata),sub:e.metadata,rarity:e.rarity}); });
   }
-  if(_pickKind!=='entity'){
+  if(_pickKind==='all'||_pickKind==='tile'){
     _pickTiles.forEach(p=>{ if(q && !p.toLowerCase().includes(q))return; out.push({kind:'tile',cat:'Tile',name:lastSeg(p),sub:p}); });
+  }
+  if(_pickKind==='all'||_pickKind==='mod'){
+    pickMods().forEach(it=>{ if(q && !(it.name.toLowerCase().includes(q)||it.sub.toLowerCase().includes(q)))return; out.push(it); });
   }
   return out;
 }
 function renderPick(){
   const items=pickItems(), list=$('#pickList');
   list.innerHTML = items.length ? items.slice(0,600).map((it,i)=>
-    `<div class="pickrow" data-i="${i}"><span class="pickbadge ${it.kind}">${it.kind==='tile'?'TILE':esc(it.cat)}</span>`
+    `<div class="pickrow" data-i="${i}"><span class="pickbadge ${it.kind}">${it.kind==='tile'?'TILE':it.kind==='mod'?'MOD':esc(it.cat)}</span>`
     +`<span class="picknm">${esc(it.name)}</span><span class="picksub">${esc(it.sub)}</span>`
+    +(it.kind==='mod'?`<span class="pickcount">×${it.count}</span>`:'')
     +(it.rarity&&it.rarity!=='NonMonster'?`<span class="pickrar">${esc(it.rarity)}</span>`:'')+`</div>`).join('')
     : `<div class="pickempty">No matches${(_pickEnts.length+_pickTiles.length===0)?' — are you in game?':''}.</div>`;
   $$('#pickList .pickrow').forEach(row=>row.onclick=()=>pickItem(items[+row.dataset.i]));
 }
 function pickItem(it){
   if(!it) return;
-  const r = it.kind==='tile'
-    ? {enabled:true,name:it.name,categories:['Tile'],match:[lastSeg(it.sub)],shape:'Diamond',color:'#f259f2',opacity:1,size:5,navigable:true,_open:true}
-    : {enabled:true,name:it.name,categories:[it.cat],match:[lastSeg(it.sub)],shape:'Star',color:'#ffd926',opacity:1,size:6,_open:true};
+  let r;
+  if(it.kind==='tile')
+    r={enabled:true,name:it.name,categories:['Tile'],match:[lastSeg(it.sub)],shape:'Diamond',color:'#f259f2',opacity:1,size:5,navigable:true,_open:true};
+  else if(it.kind==='mod')
+    r={enabled:true,name:it.name,categories:['Monster'],match:[],mods:[it.modId],shape:'Star',color:'#26d9c0',opacity:1,size:6,_open:true};
+  else
+    r={enabled:true,name:it.name,categories:[it.cat],match:[lastSeg(it.sub)],shape:'Star',color:'#ffd926',opacity:1,size:6,_open:true};
   drules.unshift(r); renderDrules(); saveDrules();
   _pickEl.classList.remove('open');
   const first=$('#drList .drrow'); if(first) first.scrollIntoView({block:'center'});
