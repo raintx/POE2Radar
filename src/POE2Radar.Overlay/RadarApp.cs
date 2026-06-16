@@ -150,14 +150,14 @@ public sealed class RadarApp : IDisposable
     // ── Auto-flask (opt-in input). Foreground + in-game gated; F8 master kill-switch.
     //    Flask keys are configurable in RadarSettings (LifeKey/ManaKey). ──
     private bool _autoFlask = true;                        // auto-on; toggle with F8
+    private DateTime _lifeFiredAt = DateTime.MinValue, _manaFiredAt = DateTime.MinValue;
     private DateTime _nextToggleAt = DateTime.MinValue;
     private DateTime _nextPathKeyAt = DateTime.MinValue;
     private DateTime _nextBrowserAt = DateTime.MinValue;
     private float _hpPct = 100f, _manaPct = 100f, _esPct = 100f;
     private int _hpCur, _hpMax, _manaCur, _manaMax, _esCur, _esMax;
     private string _flaskNote = "";
-    private string _areaCode = "", _charName = "", _charClass = "";
-    private int _charLevel;
+    private string _charName = "";
     private long _areaEntryTick;
     private nint _charNameFor;   // local-player ptr the cached _charName was read for (re-read only on change)
     private float[]? _cameraMatrix;
@@ -911,9 +911,9 @@ public sealed class RadarApp : IDisposable
             return;
         }
         _hpPct = v.HpPct; _manaPct = v.ManaPct; _esPct = v.EsPct;
-        _hpCur = v.HpCur; _hpMax = v.HpMax;
-        _manaCur = v.ManaCur; _manaMax = v.ManaMax;
-        _esCur = v.EsCur; _esMax = v.EsMax;
+        _hpCur = v.HpCur; _hpMax = v.HpUnreserved;
+        _manaCur = v.ManaCur; _manaMax = v.ManaUnreserved;
+        _esCur = v.EsCur; _esMax = v.EsUnreserved;
 
         if (!_autoFlask) { _flaskNote = "OFF (F8)"; return; }
         if (GetForegroundWindow() != _gameHwnd) { _flaskNote = "paused (PoE2 not focused)"; return; }

@@ -57,16 +57,16 @@
 
     <main>
       <div class="tabs">
-        <button class="tab on" data-tab="filters">Rules</button>
-        <button class="tab" data-tab="landmarks">Landmarks</button>
-        <button class="tab" data-tab="atlas">Atlas</button>
-        <button class="tab" data-tab="settings">Settings</button>
+        <button class="tab on" data-tab="filters" data-i18n="tabRules">Regras</button>
+        <button class="tab" data-tab="landmarks" data-i18n="lmTitle">Pontos de Referência</button>
+        <button class="tab" data-tab="atlas" data-i18n="atlasTitle">Atlas</button>
+        <button class="tab" data-tab="settings" data-i18n="tabSettings">Configurações</button>
       </div>
 
       <section class="view" data-view="filters">
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
-            <h3>Display Rules <span class="tag">&middot; one ordered ruleset &mdash; first match wins</span></h3>
+            <h3><span data-i18n="rulesTitle">Regras de Exibição</span> <span class="tag" data-i18n="rulesSub">&middot; um único conjunto ordenado &mdash; a primeira regra que combinar vence</span></h3>
             <div class="row"><div class="rl hint-row">The single source of truth for how every entity draws. Each entity is matched <b>top&ndash;to&ndash;bottom</b>; the <b>first enabled rule that matches</b> decides everything &mdash; its icon &amp; color, whether it&rsquo;s hidden, whether it shows an HP bar, and whether it&rsquo;s auto-pathed. Reorder with &#9650;/&#9660; to change precedence. A rule matches on any mix of <i>type, metadata terms, monster mods (auras/buffs), rarity, reaction, life, chest/POI/encounter state</i>; a blank condition means &ldquo;any&rdquo;. No more conflicting filters &mdash; if two rules could match, the higher one wins.</div></div>
             <div id="drList"></div>
             <div class="controls" style="margin:8px 0 0">
@@ -75,7 +75,7 @@
             </div>
           </div>
           <div class="card" style="grid-column:1/-1">
-            <h3>Hidden <span class="tag">&middot; cull entirely from radar, list &amp; nav</span></h3>
+            <h3><span data-i18n="hideTitle">Ocultos</span> <span class="tag" data-i18n="hideSubNew">&middot; ocultar totalmente do radar, lista &amp; nav</span></h3>
             <div class="row"><div class="rl hint-row">A stronger cut than a Hide rule: entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed <i>everywhere</i> &mdash; overlay, entity list, and navigation &mdash; before the display rules even run.</div></div>
             <div id="hideList" class="controls" style="margin:8px 0 14px"></div>
             <div class="controls" style="margin:0">
@@ -90,7 +90,7 @@
       <section class="view" data-view="landmarks" hidden>
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
-            <h3>Landmarks <span class="tag">&middot; curated map labels &mdash; view, fix, share</span></h3>
+            <h3><span data-i18n="lmTitle">Tiles de Pontos Ref.</span> <span class="tag" data-i18n="lmSubNew">&middot; rótulos curados do mapa &mdash; ver, fixar, compartilhar</span></h3>
             <div class="row"><div class="rl hint-row">The built-in &ldquo;known&rdquo; map features (boss arenas, exits, loot, waypoints&hellip;), labelled per area. Rename a wrong label, add your own, or hide a bad entry. <b>Export</b> a corrected list to share or submit for baking into a release; <b>Import</b> to load one. (For how a tile <i>draws</i> — icon/color/hide — use a Tile rule on the Rules tab; this is just the labels.)</div></div>
             <div class="controls" style="margin:6px 0 12px">
               <input type="search" id="lmSearch" placeholder="filter by area / tile / label…">
@@ -116,7 +116,7 @@
       <section class="view" data-view="atlas" hidden>
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
-            <h3>Atlas highlights <span class="tag">&middot; only highlighted maps draw in-game</span></h3>
+            <h3><span data-i18n="atlasTitle">Destaques do Atlas</span> <span class="tag" data-i18n="atlasSub">&middot; apenas mapas destacados são exibidos no jogo</span></h3>
             <div class="row"><div class="rl hint-row">Each atlas tile's map + <b>rolled content</b> (Powerful Map Boss, Breach, Delirium, hidden content&hellip;) read from memory. <b>Check filters below to ring those maps in-game</b> &mdash; only highlighted maps are drawn, so you can spot content the game hides by default. Open the Atlas in-game, then Refresh.</div></div>
             <div class="controls" style="margin:6px 0 12px">
               <button class="addbtn" id="atlasRefresh" style="width:auto;margin:0;padding:9px 16px">&#8635; Refresh</button>
@@ -142,7 +142,7 @@
       <section class="view" data-view="settings" hidden>
         <div class="panel-grid">
           <div class="card">
-            <h3>Radar Display</h3>
+            <h3 data-i18n="dispRadar">Exibição do Radar</h3>
             <div class="row"><div class="rl">Show terrain<small>walkable-terrain bitmap</small></div>
               <label class="sw"><input type="checkbox" data-set="showTerrain"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Show player blip<small>blue dot marking your own position</small></div>
@@ -159,7 +159,7 @@
               <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
           </div>
           <div class="card">
-            <h3>Monster HP Bars <span class="tag">&middot; by rarity</span></h3>
+            <h3><span data-i18n="hpTitle">Barras HP Monstros</span> <span class="tag" data-i18n="hpSub">&middot; por raridade</span></h3>
             <div class="row"><div class="rl hint-row">Toggle the bar on/off per rarity with the <b>On</b> checkbox &mdash; uncheck all to disable HP bars entirely, or leave only the rarities you want. The rest sets the bar <i>geometry</i> per rarity.</div></div>
             <div class="hpgrid">
               <span class="hph">On</span><span class="hph">Rarity</span><span class="hph">Width</span><span class="hph">Border</span><span class="hph">Thick</span>
@@ -192,7 +192,7 @@
             <div class="row"><div class="rl hint-row">Bar fill follows the monster icon color; set border color &amp; thickness per rarity (thickness 0 = no border). Offset Y negative = above the mob.</div></div>
           </div>
           <div class="card">
-            <h3>Terrain <span class="tag">&middot; walkable overlay</span></h3>
+            <h3><span data-i18n="terrTitle">Terreno</span> <span class="tag" data-i18n="terrSub">&middot; overlay andável</span></h3>
             <div class="row"><div class="rl">Interior fill<small>wash over walkable cells</small></div>
               <span class="trow-ctl">
                 <input type="color" class="i-color" data-tcolor="interiorColor">
@@ -206,7 +206,7 @@
             <div class="row"><div class="rl hint-row">Edits rebuild the terrain bitmap; use &ldquo;Show terrain&rdquo; above to hide it entirely.</div></div>
           </div>
           <div class="card">
-            <h3>Map Calibration</h3>
+            <h3 data-i18n="calTitle">Calibração do Mapa</h3>
             <div class="row"><div class="rl">Scale multiplier<small>projection scale of the map overlay</small></div>
               <input class="numin" type="number" step="0.01" data-set="scaleMul"></div>
             <div class="row"><div class="rl">Offset X</div><input class="numin" type="number" step="1" data-set="offX"></div>
@@ -214,7 +214,7 @@
             <div class="row"><div class="rl hint-row">Adjust here &mdash; changes apply live (no in-game hotkeys).</div></div>
           </div>
           <div class="card">
-            <h3>Auto-Flask</h3>
+            <h3 data-i18n="flaskTitle">Auto-Poção</h3>
             <div class="row"><div class="rl">Life flask triggers on<small>which pool the life flask key watches &mdash; ES is ignored if your build has none</small></div>
               <select class="numin selin" data-set="lifeFlaskMode">
                 <option value="Health">Health %</option>
@@ -227,9 +227,9 @@
               <input class="numin" type="number" step="1" min="0" max="100" data-set="esThresholdPct"></div>
             <div class="row"><div class="rl">Mana threshold %<small>tap mana flask below this Mana %</small></div>
               <input class="numin" type="number" step="1" min="0" max="100" data-set="manaThresholdPct"></div>
-            <div class="row"><div class="rl">Life flask key</div>
+            <div class="row"><div class="rl" data-i18n="flaskLifeKey">Tecla Poção Vida</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="lifeKey"></div>
-            <div class="row"><div class="rl">Mana flask key</div>
+            <div class="row"><div class="rl" data-i18n="flaskManaKey">Tecla Poção Mana</div>
               <input class="numin keyin" type="text" maxlength="1" data-set="manaKey"></div>
             <div class="row"><div class="rl">Life cooldown<small>min ms between life taps</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="lifeCooldownMs"></div>
@@ -238,22 +238,22 @@
             <div class="row"><div class="rl hint-row">F8 toggles auto-flask in-game. Status: <span id="flaskState">&mdash;</span></div></div>
           </div>
           <div class="card">
-            <h3>Ground Item Pricing <span class="tag">&middot; poe2scout</span></h3>
-            <div class="row"><div class="rl">Enabled<small>draw value labels over dropped items</small></div>
+            <h3 data-i18n="pricingTitle">Preços de Itens no Chão <span class="tag" data-i18n="pricingSub">&middot; poe2scout</span></h3>
+            <div class="row"><div class="rl" data-i18n="pricingEnabled">Habilitado<small data-i18n="pricingEnabledDesc">desenhar valores em cima dos itens caídos</small></div>
               <label class="sw"><input type="checkbox" data-gi="enabled"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl hint-row">Show a label for these categories:</div></div>
+            <div class="row"><div class="rl hint-row" data-i18n="pricingCats">Mostrar valor para estas categorias:</div></div>
             <div class="chips" id="giCats">
-              <span class="chip" data-gicat="Uniques">Uniques</span>
-              <span class="chip" data-gicat="Runes">Runes</span>
-              <span class="chip" data-gicat="Essences">Essences</span>
-              <span class="chip" data-gicat="Currency">Currency</span>
-              <span class="chip" data-gicat="Fragments">Fragments</span>
-              <span class="chip" data-gicat="Breach">Breach</span>
-              <span class="chip" data-gicat="Ritual">Ritual</span>
-              <span class="chip" data-gicat="Delirium">Delirium</span>
-              <span class="chip" data-gicat="Expedition">Expedition</span>
+              <span class="chip" data-gicat="Uniques" data-i18n="Uniques">Únicos</span>
+              <span class="chip" data-gicat="Runes" data-i18n="Runes">Runas</span>
+              <span class="chip" data-gicat="Essences" data-i18n="Essences">Essências</span>
+              <span class="chip" data-gicat="Currency" data-i18n="Currency">Moedas</span>
+              <span class="chip" data-gicat="Fragments" data-i18n="Fragments">Fragmentos</span>
+              <span class="chip" data-gicat="Breach" data-i18n="Breach">Breach</span>
+              <span class="chip" data-gicat="Ritual" data-i18n="Ritual">Ritual</span>
+              <span class="chip" data-gicat="Delirium" data-i18n="Delirium">Delirium</span>
+              <span class="chip" data-gicat="Expedition" data-i18n="Expedition">Expedition</span>
             </div>
-            <div class="row"><div class="rl">Unique min value<small>hide uniques worth less than this (Ex)</small></div>
+            <div class="row"><div class="rl" data-i18n="pricingUniqueMin">Valor mínimo para Únicos<small data-i18n="pricingUniqueMinDesc">ocultar únicos que valem menos que isso (Ex)</small></div>
               <input class="numin" type="number" step="0.1" min="0" data-gi="uniqueMinEx"></div>
             <div class="row"><div class="rl">Highlight threshold<small>border/emphasis at or above this value (Ex)</small></div>
               <input class="numin" type="number" step="1" min="0" data-gi="highlightMinEx"></div>
