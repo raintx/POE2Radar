@@ -67,11 +67,11 @@
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
             <h3><span data-i18n="rulesTitle">Regras de Exibição</span> <span class="tag" data-i18n="rulesSub">&middot; um único conjunto ordenado &mdash; a primeira regra que combinar vence</span></h3>
-            <div class="row"><div class="rl hint-row">The single source of truth for how every entity draws. Each entity is matched <b>top&ndash;to&ndash;bottom</b>; the <b>first enabled rule that matches</b> decides everything &mdash; its icon &amp; color, whether it&rsquo;s hidden, whether it shows an HP bar, and whether it&rsquo;s auto-pathed. Reorder with &#9650;/&#9660; to change precedence. A rule matches on any mix of <i>type, metadata terms, monster mods (auras/buffs), rarity, reaction, life, chest/POI/encounter state</i>; a blank condition means &ldquo;any&rdquo;. No more conflicting filters &mdash; if two rules could match, the higher one wins.</div></div>
+            <div class="row"><div class="rl hint-row" data-i18n="rulesHint">A fonte única de verdade sobre como cada entidade é desenhada. Cada entidade é testada <b>de cima para baixo</b>; a <b>primeira regra habilitada que coincidir</b> decide tudo &mdash; seu ícone e cor, se fica oculto, se exibe barra de HP e se desenha rota automática. Reordene com &#9650;/&#9660; para mudar a prioridade. Uma regra pode combinar qualquer <i>tipo, termos de metadados, mods de monstros (auras/buffs), raridade, reação, vida, estado de baú/Ponto de Interesse</i>; uma condição em branco significa &ldquo;qualquer&rdquo;. Sem mais filtros conflitantes &mdash; se duas regras puderem coincidir, a que estiver mais acima vence.</div></div>
             <div id="drList"></div>
             <div class="controls" style="margin:8px 0 0">
               <button class="addbtn" id="drPick" style="width:auto;margin:0;padding:9px 16px">+ Add from game data…</button>
-              <button class="addbtn" id="drAdd" style="width:auto;margin:0;padding:9px 16px">+ Add blank rule</button>
+              <button class="addbtn" id="drAdd" style="width:auto;margin:0;padding:9px 16px" data-i18n="btnAddBlank">+ Adicionar regra vazia</button>
             </div>
           </div>
           <div class="card" style="grid-column:1/-1">
@@ -79,8 +79,8 @@
             <div class="row"><div class="rl hint-row">A stronger cut than a Hide rule: entities whose metadata contains a pattern (or matches a <code>*</code>/<code>?</code> glob) are removed <i>everywhere</i> &mdash; overlay, entity list, and navigation &mdash; before the display rules even run.</div></div>
             <div id="hideList" class="controls" style="margin:8px 0 14px"></div>
             <div class="controls" style="margin:0">
-              <input type="search" id="hidePattern" placeholder="pattern or glob to hide (e.g. AbyssCrack, *Daemon*)">
-              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px">+ Hide</button>
+              <input type="search" id="hidePattern" placeholder="padrão ou nome para ocultar..." data-i18n="phHide">
+              <button class="addbtn" id="hideAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnHide">+ Ocultar</button>
             </div>
           </div>
         </div>
@@ -94,18 +94,18 @@
             <div class="row"><div class="rl hint-row">The built-in &ldquo;known&rdquo; map features (boss arenas, exits, loot, waypoints&hellip;), labelled per area. Rename a wrong label, add your own, or hide a bad entry. <b>Export</b> a corrected list to share or submit for baking into a release; <b>Import</b> to load one. (For how a tile <i>draws</i> — icon/color/hide — use a Tile rule on the Rules tab; this is just the labels.)</div></div>
             <div class="controls" style="margin:6px 0 12px">
               <input type="search" id="lmSearch" placeholder="filter by area / tile / label…">
-              <button class="chip on" id="lmAreaOnly">This area only</button>
+              <button class="chip on" id="lmAreaOnly" data-i18n="btnAreaOnly">Apenas nesta área</button>
               <span style="flex:1"></span>
               <button class="addbtn" id="lmImport" style="width:auto;margin:0;padding:8px 14px">Import…</button>
-              <button class="addbtn" id="lmExport" style="width:auto;margin:0;padding:8px 14px">Export</button>
+              <button class="addbtn" id="lmExport" style="width:auto;margin:0;padding:8px 14px" data-i18n="btnExport">Exportar</button>
             </div>
             <div id="lmList"></div>
             <div class="mechrow">
               <div class="top">
                 <input class="mname" id="lmArea" placeholder="area (e.g. P2_3, or *)" style="max-width:150px">
                 <input class="mname" id="lmPat" placeholder="tile path / pattern">
-                <input class="mname" id="lmLabel" placeholder="label">
-                <button class="addbtn" id="lmAdd" style="width:auto;margin:0;padding:8px 16px">+ Add</button>
+                <input class="mname" id="lmLabel" placeholder="rótulo" data-i18n="phLabel">
+                <button class="addbtn" id="lmAdd" style="width:auto;margin:0;padding:8px 16px" data-i18n="btnAdd">+ Adicionar</button>
               </div>
             </div>
           </div>
@@ -119,16 +119,16 @@
             <h3><span data-i18n="atlasTitle">Destaques do Atlas</span> <span class="tag" data-i18n="atlasSub">&middot; apenas mapas destacados são exibidos no jogo</span></h3>
             <div class="row"><div class="rl hint-row">Each atlas tile's map + <b>rolled content</b> (Powerful Map Boss, Breach, Delirium, hidden content&hellip;) read from memory. <b>Check filters below to ring those maps in-game</b> &mdash; only highlighted maps are drawn, so you can spot content the game hides by default. Open the Atlas in-game, then Refresh.</div></div>
             <div class="controls" style="margin:6px 0 12px">
-              <button class="addbtn" id="atlasRefresh" style="width:auto;margin:0;padding:9px 16px">&#8635; Refresh</button>
+              <button class="addbtn" id="atlasRefresh" style="width:auto;margin:0;padding:9px 16px" data-i18n="btnRefresh">&#8635; Atualizar</button>
               <span style="flex:1"></span>
               <span class="tag" id="atlasStatus">&mdash;</span>
             </div>
             <div class="row" style="margin:0 0 10px;flex-direction:column;align-items:stretch;gap:6px">
               <div class="controls" style="gap:8px;align-items:center">
                 <span class="hint-row" style="flex:1"><b id="atlasHlCount">0 active</b> &mdash; click a row to <b>Track</b> (ring it in-game); click the <b style="color:#e0b341">&#10148;</b> to <b>Arrow</b> (point to it from the screen edge when off-screen). Track without Arrow = highlight only, no arrow.</span>
-                <input type="search" id="atlasHlFilter" placeholder="search filters&hellip;" style="width:200px">
-                <button class="chip" id="atlasHlSelOnly">Selected</button>
-                <button class="chip" id="atlasHlClear">Clear</button>
+                <input type="search" id="atlasHlFilter" placeholder="buscar filtros..." data-i18n="phSearchFilters" style="width:200px">
+                <button class="chip" id="atlasHlSelOnly" data-i18n="btnSelected">Selecionados</button>
+                <button class="chip" id="atlasHlClear" data-i18n="btnClear">Limpar</button>
               </div>
               <div id="atlasHlTable" style="max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:6px">
                 <span class="hint-row" style="padding:8px;display:block">Open the Atlas in-game + Refresh to list filters.</span>
