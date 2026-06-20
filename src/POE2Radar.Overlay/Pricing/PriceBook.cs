@@ -253,7 +253,7 @@ public sealed class PriceBook
                 var item = new PricedItem(m.Name.Trim(), ex, qty, type);
                 Upsert(byName, Normalize(m.Name), item);
                 var art = ArtBasenameFromIcon(m.Image);
-                if (art != null) Upsert(byArt, art, item);
+                if (art != null) Upsert(byArt, art, item, preferVolume: true);
             }
         }
         catch { /* a missing/empty category is fine — skip it */ }
@@ -279,17 +279,24 @@ public sealed class PriceBook
                 var item = new PricedItem(ln.Name.Trim(), ex, ln.ListingCount ?? 0, type);
                 Upsert(byName, Normalize(ln.Name), item);
                 var art = ArtBasenameFromIcon(ln.Icon);
-                if (art != null) Upsert(byArt, art, item);
+                if (art != null) Upsert(byArt, art, item, preferVolume: true);
             }
         }
         catch { }
     }
 
-    // Keep the higher-value listing on a key collision (shared art across variants → show the best).
-    private static void Upsert(Dictionary<string, PricedItem> map, string key, PricedItem item)
+    /// <summary>Insert/replace on a key collision. By NAME (unique keys) keep the higher value. By ART,
+    /// currency TIERS share one icon (Exalted/Greater/Perfect Exalted → same "CurrencyAddModToRare" art),
+    /// so keeping the most VALUABLE made every plain Exalted inherit Perfect Exalted's price — instead keep
+    /// the MOST-TRADED listing (<paramref name="preferVolume"/>), which is the common drop.</summary>
+    private static void Upsert(Dictionary<string, PricedItem> map, string key, PricedItem item, bool preferVolume = false)
     {
         if (string.IsNullOrEmpty(key)) return;
-        if (!map.TryGetValue(key, out var cur) || item.Exalted > cur.Exalted) map[key] = item;
+        if (!map.TryGetValue(key, out var cur)) { map[key] = item; return; }
+        var replace = preferVolume
+            ? item.Quantity > cur.Quantity || (item.Quantity == cur.Quantity && item.Exalted > cur.Exalted)
+            : item.Exalted > cur.Exalted;
+        if (replace) map[key] = item;
     }
 
     /// <summary>poe.ninja icon → basename. ".../<hash>/Earthbound.png" → "Earthbound" (handles both the

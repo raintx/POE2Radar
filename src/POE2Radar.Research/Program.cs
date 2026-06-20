@@ -46,6 +46,45 @@ if (HasFlag(args, "--find-map"))
 if (HasFlag(args, "--watch-expedition"))
     return RunWatchExpedition(process, reader);
 
+if (HasFlag(args, "--ritual"))
+    return RunRitual(process, reader, HasFlag(args, "--watch"));
+
+if (HasFlag(args, "--tribute"))
+    return RunTribute(process, reader, TryGetStrArg(args, "--find"));
+
+if (HasFlag(args, "--tribute-scan"))
+    return RunTributeScan(process, reader, TryGetStrArg(args, "--costs") ?? "1590", TryGetIntArg(args, "--cost") ?? 1590);
+
+if (HasFlag(args, "--tribute-tiles"))
+    return RunTributeTiles(process, reader, TryGetStrArg(args, "--costs") ?? "1755,1590,1395,1230,174");
+
+if (HasFlag(args, "--tribute-hover"))
+    return RunTributeHover(process, reader);
+
+if (HasFlag(args, "--ritual-rewards"))
+    return RunRitualRewards(process, reader, TryGetStrArg(args, "--reward") ?? "Venopuncture");
+
+if (HasFlag(args, "--tooltip-capture"))
+    return RunTooltipCapture(process, reader);
+
+if (HasFlag(args, "--ritual-shop"))
+    return RunRitualShop(process, reader);
+
+if (TryGetHexArg(args, "--eldump") is { } elAddr)
+    return RunElDump(reader, elAddr, TryGetIntArg(args, "--span") ?? 0x600);
+
+if (TryGetStrArg(args, "--findwstr") is { } needleW)
+    return RunFindWStr(process, reader, needleW);
+
+if (TryGetHexArg(args, "--subtree") is { } subRoot)
+    return RunSubtree(process, reader, subRoot, TryGetIntArg(args, "--up") ?? 8, TryGetIntArg(args, "--down") ?? 6);
+
+if (HasFlag(args, "--rune-dump"))
+    return RunRuneDump(process, reader, TryGetIntArg(args, "--radius") ?? 120);
+
+if (HasFlag(args, "--monolith"))
+    return RunMonolith(process, reader);
+
 if (HasFlag(args, "--runeforge"))
     return RunRuneforge(process, reader);
 
@@ -60,6 +99,9 @@ if (TryGetStrArg(args, "--lootstruct") is { } lootName)
 
 if (HasFlag(args, "--lootmap"))
     return RunLootMap(process, reader);
+
+if (TryGetStrArg(args, "--lootwatch") is { } lootWatchName)
+    return RunLootWatch(process, reader, lootWatchName);
 
 if (HasFlag(args, "--watch"))
     return RunWatch(process, reader);
@@ -307,6 +349,7 @@ Console.WriteLine("  --hp <N> [--mana <N>]      value-scan for the player Life c
 Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for inspection");
 Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for inspection");
 Console.WriteLine("  --entity <hexAddr>         walk a PoE2 entity: id, metadata path, component map, Render→grid, Life");
+Console.WriteLine("  --rune-dump [--radius N]   dump nearby entities (path/components/MinimapIcon/small-ints) + tile paths near you");
 Console.WriteLine("  --presence [--diff]        baseline (then --diff) player components to find the presence-radius float");
 Console.WriteLine("  --devtree [--port N]       browser-based live memory/UI/entity explorer (default port 7778)");
 Console.WriteLine("  --serverdata               dump ServerData (AreaInstance+0x580): strings + StdVector quest-list candidates");
@@ -731,6 +774,14 @@ static string ReadModName(MemoryReader reader, nint modsDatRow)
 // For one item entity (address from --inventory output): metadata, every component, the Mods
 // rarity/identified + each affix's id/values + a Mods.dat ROW dump (string-pointer scan for the
 // affix display name + stat-key strings), and the Sockets component contents (socketed runes/gems).
+// True for a plausible human-readable base-type name (≥3 printable ASCII chars, starts alpha).
+static bool LooksPrintable(string? s)
+{
+    if (string.IsNullOrWhiteSpace(s) || s.Length < 3 || !char.IsLetter(s[0])) return false;
+    foreach (var ch in s) if (ch is < ' ' or > '~') return false;
+    return true;
+}
+
 static int RunItemDump(MemoryReader reader, nint item)
 {
     var meta = ReadEntityMetadata(reader, item);
@@ -740,6 +791,28 @@ static int RunItemDump(MemoryReader reader, nint item)
 
     var comps = ComponentNamesAndAddrs(reader, item);
     Console.WriteLine($"  components ({comps.Count}): {string.Join(", ", comps.Select(c => c.name).OrderBy(s => s, StringComparer.Ordinal))}");
+
+    // ── Base component probe: locate the rendered BASE-TYPE NAME ("Greater Orb of Augmentation"). Walk the
+    //    component's first qwords; for each canonical pointer, try (a) a direct UTF-16 string, and (b) one
+    //    deref then UTF-16 (BaseItemTypes row → name ptr). Prints offset + the string so we can pin it.
+    var basec = comps.FirstOrDefault(c => c.name == "Base").addr;
+    if (basec != 0)
+    {
+        Console.WriteLine($"\n  Base @ 0x{basec:X} — Base+off → BaseItemTypes ROW; scan ROW fields for the name:");
+        for (var off = 0; off <= 0x40; off += 8)
+        {
+            var row = SafePtr(reader, basec + off);
+            if (row == 0) continue;
+            // Treat `row` as a dat row: scan its qword fields as string pointers (one deref → UTF-16).
+            for (var k = 0; k <= 0x40; k += 8)
+            {
+                var sp = SafePtr(reader, row + k);
+                if (sp == 0) continue;
+                var s = reader.ReadStringUtf16(sp, 64);
+                if (LooksPrintable(s)) Console.WriteLine($"    Base+0x{off:X2} → row+0x{k:X2} → \"{s}\"");
+            }
+        }
+    }
 
     // ── Mods component ──
     var mods = comps.FirstOrDefault(c => c.name == "Mods").addr;
@@ -2562,6 +2635,1148 @@ static int RunWatchExpedition(ProcessHandle process, MemoryReader reader)
     }
 }
 
+// ── Ritual: find the signal that flips when a ritual altar is COMPLETED ───────────────────────────
+// Ritual altars don't fade their MinimapIcon (MinimapIcon.CompletedState stays 0), so the overlay's
+// generic "Hide completed encounters" rule never catches them. This probe dumps every non-monster
+// ritual entity in the area side-by-side so the discriminating field jumps out: stand in a map with a
+// MIX of completed and not-yet-started ritual altars and run `--ritual`. It prints, per altar (sorted
+// nearest-first — the active one is usually the nearest), the component list plus the obvious
+// completion candidates (MinimapIcon.CompletedState, StateMachine state, Targetable byte) and a raw
+// hex dump of the StateMachine + MinimapIcon components. Compare the completed altars vs the active one
+// to spot the field that differs. Add `--watch` to re-poll on change (to catch the moment one flips).
+static int RunRitual(ProcessHandle process, MemoryReader reader, bool watch)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("Could not lock GameState slot (in game?)."); return 1; }
+    var live = new Poe2Live(reader, slot);
+
+    void DumpOnce()
+    {
+        if (!live.TryResolve(out _, out var ai, out var lp)) { Console.Error.WriteLine("Could not resolve area."); return; }
+        var pg = EntityGrid(reader, lp);
+
+        var altars = new List<(uint id, nint ent, string meta, float dist, System.Numerics.Vector2 g)>();
+        var lights = new List<(uint id, System.Numerics.Vector2 g)>();
+        foreach (var (id, ent, meta) in WalkEntities(reader, ai))
+        {
+            if (meta.IndexOf("itual", StringComparison.OrdinalIgnoreCase) < 0) continue; // [Rr]itual
+            if (meta.Contains("/Monsters/", StringComparison.Ordinal)) continue;          // skip league mobs
+            var g = EntityGrid(reader, ent);
+            var d = g == default ? 9999f : (float)Math.Sqrt((g.X - pg.X) * (g.X - pg.X) + (g.Y - pg.Y) * (g.Y - pg.Y));
+            altars.Add((id, ent, meta, d, g));
+            if (meta.IndexOf("RitualRuneLight", StringComparison.OrdinalIgnoreCase) >= 0) lights.Add((id, g));
+        }
+        altars.Sort((a, b) => a.dist.CompareTo(b.dist));
+
+        Console.WriteLine($"\n=== {altars.Count} non-monster ritual entities ({lights.Count} RitualRuneLight) ===");
+        Console.WriteLine($"player grid ({pg.X:F0},{pg.Y:F0})  lights: {string.Join(" | ", lights.Select(l => $"id{l.id}@({l.g.X:F0},{l.g.Y:F0})"))}");
+        foreach (var (id, ent, meta, dist, g) in altars)
+        {
+            // For each RitualRuneObject, distance to the NEAREST light (the "is this the active one" test).
+            var nearLight = lights.Count == 0 ? -1f
+                : lights.Min(l => (float)Math.Sqrt((l.g.X - g.X) * (l.g.X - g.X) + (l.g.Y - g.Y) * (l.g.Y - g.Y)));
+            Console.WriteLine($"\nid={id} ent=0x{ent:X} grid=({g.X:F0},{g.Y:F0}) dist={dist:F0} nearestLight={nearLight:F0}  {meta}");
+            DumpComponentList(reader, ent, "  ");
+
+            var icon = ResolveComponentAddr(reader, ent, "MinimapIcon");
+            if (icon != 0)
+            {
+                reader.TryReadStruct<int>(icon + Poe2.MinimapIcon.CompletedState, out var cs);
+                Console.WriteLine($"  MinimapIcon 0x{icon:X}  CompletedState(+0x10)={cs}");
+                DumpInts(reader, icon, 0x40, "    MinimapIcon");
+            }
+            var sm = ResolveComponentAddr(reader, ent, "StateMachine");
+            if (sm != 0)
+            {
+                reader.TryReadStruct<int>(sm + 0x10, out var st);
+                Console.WriteLine($"  StateMachine 0x{sm:X}  state(+0x10)={st}");
+                DumpInts(reader, sm, 0x60, "    StateMachine");
+            }
+            var tgt = ResolveComponentAddr(reader, ent, "Targetable");
+            if (tgt != 0)
+            {
+                Console.WriteLine($"  Targetable 0x{tgt:X}");
+                DumpInts(reader, tgt, 0x20, "    Targetable");
+            }
+        }
+    }
+
+    if (!watch) { DumpOnce(); return 0; }
+
+    // Watch mode: snapshot a wide byte window of each ritual altar's components and report only the
+    // 4-byte words that CHANGE. Pointers (vtables etc.) are stable per fixed entity address over a short
+    // window, so a completion event shows up as a clean flip of one or two scalar fields. Components
+    // watched cover the likely homes of a "completed" flag. Run, then complete the nearest ritual.
+    string[] watchComps = { "StateMachine", "Stats", "Life", "Animated", "Buffs", "BaseEvents", "InteractionAction" };
+    const int span = 0x100;
+    var prev = new Dictionary<(uint id, string comp), int[]>();
+    Console.WriteLine("RITUAL watch — logging changed component words. Complete the nearest ritual now. Ctrl+C to stop.\n");
+    if (!live.TryResolve(out _, out var ai0, out _)) { Console.Error.WriteLine("no area"); return 1; }
+    while (true)
+    {
+        if (live.TryResolve(out _, out var ai, out _))
+        {
+            foreach (var (id, ent, meta) in WalkEntities(reader, ai))
+            {
+                if (meta.IndexOf("Ritual/RitualRune", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                foreach (var comp in watchComps)
+                {
+                    var addr = ResolveComponentAddr(reader, ent, comp);
+                    if (addr == 0) continue;
+                    var buf = new byte[span];
+                    if (reader.TryReadBytes(addr, buf) < span) continue;
+                    var words = new int[span / 4];
+                    for (var i = 0; i < words.Length; i++) words[i] = BitConverter.ToInt32(buf, i * 4);
+                    var key = (id, comp);
+                    if (prev.TryGetValue(key, out var old))
+                        for (var i = 0; i < words.Length; i++)
+                            if (words[i] != old[i])
+                                Console.WriteLine($"[t={Environment.TickCount64}] id={id} ({meta.Split('/')[^1]}) {comp}+0x{i * 4:X2}: {old[i]} -> {words[i]}");
+                    prev[key] = words;
+                }
+            }
+        }
+        Thread.Sleep(500);
+    }
+}
+
+// ── Ritual TRIBUTE shop panel discovery ──────────────────────────────────────────────────────────
+// The post-ritual "buy with tribute" shop is a UI panel (NOT a ServerData PlayerInventory — the 5x1
+// reward inventories there read empty). So we attack it from the UiElement tree like --runeforge:
+//   1) GameUi = Ptr(InGameState + UiRoot 0x2F0); full-tree DFS over Children (+0x10/+0x18 StdVector).
+//   2) TEXT pass: every element's inline std::wstring @ +0x390 (the runeforge text offset). Report each
+//      element whose text matches an anchor needle (the known cost "1,590"/"1590" + "tribute"/"ritual"/
+//      "briar" + any --find <needle>), with its geometry and full ancestor chain (Parent +0xB8) — that
+//      chain is the raw material for a flag-fingerprint resolve walk later.
+//   3) ITEM pass: every element whose body holds a pointer to a Metadata/Items entity (the reward icon
+//      slots) — print art basename + rarity + the ancestor chain, so each cost label can be tied to its
+//      reward item (priced via art/name like the inventory path). Run with the tribute shop OPEN.
+static int RunTribute(ProcessHandle process, MemoryReader reader, string? extraNeedle)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("Could not lock GameState slot (in game?)."); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out var igs, out _, out _)) { Console.Error.WriteLine("Could not resolve InGameState."); return 1; }
+    var gameUi = SafePtr(reader, igs + Poe2.InGameState.UiRoot);
+    if (gameUi == 0) { Console.Error.WriteLine("GameUi (UiRoot) null."); return 1; }
+    Console.WriteLine($"GameUi 0x{gameUi:X}");
+
+    var needles = new List<string> { "1,590", "1590", "tribute", "ritual", "briar", "reroll", "defer", "favour", "sacrifice" };
+    if (!string.IsNullOrWhiteSpace(extraNeedle)) needles.Add(extraNeedle.Trim());
+
+    const int TextWStr = 0x390;
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+
+    // ── DFS the whole UiElement tree once, recording text-bearing + item-bearing elements. ──
+    var textHits = new List<(nint el, int depth, uint flags, string text, bool needle)>();
+    var itemHits = new List<(nint el, int depth, uint flags, nint item, string art, int rarity, string meta)>();
+    var visited = new HashSet<nint>();
+    var stack = new Stack<(nint el, int depth)>();
+    stack.Push((gameUi, 0));
+    var nodes = 0;
+    while (stack.Count > 0 && nodes < 300_000)
+    {
+        var (el, depth) = stack.Pop();
+        if (el == 0 || !visited.Add(el) || depth > 80) continue;
+        nodes++;
+
+        reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags);
+
+        // Text: inline wstring @ +0x390.
+        var text = ReadStdWString(reader, el + TextWStr);
+        if (!string.IsNullOrEmpty(text) && text.Length <= 120 && IsMostlyPrintable(text))
+        {
+            var isNeedle = needles.Any(nd => text.Contains(nd, StringComparison.OrdinalIgnoreCase));
+            textHits.Add((el, depth, flags, text, isNeedle));
+        }
+
+        // Item icon: a qword in the element body resolving to a Metadata/Items entity.
+        var body = new byte[0x300];
+        if (reader.TryReadBytes(el, body) >= body.Length)
+            for (var o = 0x20; o + 8 <= body.Length; o += 8)
+            {
+                var cand = (nint)BitConverter.ToInt64(body, o);
+                if ((ulong)cand is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+                var meta = ReadEntityMetadata(reader, cand);
+                if (!meta.StartsWith("Metadata/Items", StringComparison.Ordinal)) continue;
+                var ri = ResolveComponentAddr(reader, cand, "RenderItem");
+                var art = ri == 0 ? "" : ItemArtBasename(reader.ReadStringUtf16(SafePtr(reader, ri + Poe2.RenderItemComponent.ResourcePath), 128)) ?? "";
+                var mods = ResolveComponentAddr(reader, cand, "Mods");
+                var rarity = -1; if (mods != 0) reader.TryReadStruct<int>(mods + Poe2.ModsComponent.Rarity, out rarity);
+                itemHits.Add((el, depth, flags, cand, art, rarity, meta));
+                break; // one item ptr per element is enough to flag it
+            }
+
+        if (RfChildren(reader, el, out var first, out var n))
+            for (long i = 0; i < n; i++)
+                stack.Push((SafePtr(reader, first + (nint)(i * 8)), depth + 1));
+    }
+    Console.WriteLine($"walked {nodes} UI elements — {textHits.Count} text, {itemHits.Count} item-bearing\n");
+
+    // ── Anchor needle matches (the cost labels / titles), with full ancestor chain. ──
+    Console.WriteLine("=== NEEDLE matches (cost labels / panel text) ===");
+    foreach (var h in textHits.Where(t => t.needle))
+    {
+        DumpUiEl(reader, h.el, h.depth, h.flags, $"\"{h.text}\"");
+        DumpAncestors(reader, h.el);
+    }
+    if (!textHits.Any(t => t.needle)) Console.WriteLine("(no needle matches — is the tribute shop open? text may live at a different offset)");
+
+    // ── Reward item icons, with ancestor chain. ──
+    Console.WriteLine("\n=== ITEM-bearing elements (reward icons) ===");
+    foreach (var h in itemHits)
+    {
+        var rar = h.rarity switch { 0 => "Normal", 1 => "Magic", 2 => "Rare", 3 => "Unique", _ => $"r{h.rarity}" };
+        DumpUiEl(reader, h.el, h.depth, h.flags, $"item=0x{h.item:X} {rar} {h.art}  {h.meta}");
+        DumpAncestors(reader, h.el);
+    }
+    if (itemHits.Count == 0) Console.WriteLine("(no item-bearing UI elements found)");
+
+    // ── Full text dump (so we can eyeball the whole panel layout). ──
+    Console.WriteLine("\n=== ALL visible text elements (depth-ordered) ===");
+    foreach (var h in textHits.Where(t => (t.flags & VisMask) != 0).OrderBy(t => t.depth).ThenBy(t => (long)t.el))
+        Console.WriteLine($"  d{h.depth,2} 0x{h.el:X} flags=0x{h.flags & ~VisMask:X}  \"{h.text}\"");
+    return 0;
+}
+
+// ── Tribute reward struct finder — value-scan for a known item cost (e.g. 1590) ───────────────────
+// The reward NAMES + COSTS are NOT in the UI text tree (names render on hover; costs aren't text), so
+// the data lives in a server/data struct the UI renders from. We find it monolith-style: scan private
+// heap for the int32 cost, and for each hit check a ±window for (a) a pointer to a Metadata/Items entity
+// (the reward item) and (b) other plausible costs — that combination uniquely fingerprints the reward
+// array. For each promising hit, dump the surrounding qwords + any item entity's art/rarity/name. Run
+// with the tribute shop open; pass --cost N to scan a different known cost.
+static int RunTributeScan(ProcessHandle process, MemoryReader reader, string costsCsv, int primary)
+{
+    var costs = costsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Select(s => int.TryParse(s, out var n) ? n : -1).Where(n => n > 0).Distinct().ToArray();
+    if (costs.Length == 0) costs = new[] { primary };
+    if (!costs.Contains(primary)) primary = costs[0];
+    var others = costs.Where(c => c != primary).ToArray();
+    Console.WriteLine($"Co-location scan: primary={primary}, others=[{string.Join(",", others)}].");
+    Console.WriteLine($"Scanning private heap for int32=={primary}; for each hit, counting other costs within ±0x800…\n");
+
+    // Match either the int or the float bit-pattern of a cost (we don't yet know the field type).
+    var costBits = costs.ToDictionary(c => c, c => new[] { c, BitConverter.SingleToInt32Bits(c) });
+    bool IsCost(int v, int c) => v == c || v == BitConverter.SingleToInt32Bits(c);
+    var primBits = new HashSet<int>(costBits[primary]);
+
+    var buf = new byte[1 << 20];
+    var hits = new List<nint>();
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+    {
+        for (long o = 0; o < regSize && hits.Count < 400000; o += buf.Length - 8)
+        {
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            for (var i = 0; i + 4 <= got; i += 4)
+                if (primBits.Contains(BitConverter.ToInt32(buf, i))) hits.Add(regBase + (nint)(o + i));
+        }
+    }
+    Console.WriteLine($"raw primary hits (int OR float): {hits.Count}.\n");
+
+    // All-five-in-a-window detector (no order/stride assumption): for each primary hit, require EVERY
+    // other cost to appear within ±Win. The monotonic-counter false positives contain 1230/1395/1755 but
+    // NOT 174, so demanding all four kills them; we also reject runs where an adjacent dword is primary±1.
+    const int Win = 0x800;
+    var arrays = new List<(nint hit, List<(int cost, int off)> where)>();
+    foreach (var hit in hits)
+    {
+        reader.TryReadStruct<int>(hit - 4, out var pm); reader.TryReadStruct<int>(hit + 4, out var nx);
+        if (pm == primary - 1 || nx == primary + 1 || pm == primary + 1 || nx == primary - 1) continue; // counter run
+
+        var win = new byte[Win * 2];
+        if (reader.TryReadBytes(hit - Win, win) < win.Length) continue;
+        var where = new List<(int cost, int off)> { (primary, 0) };
+        var all = true;
+        foreach (var c in others)
+        {
+            var at = int.MinValue;
+            for (var o = 0; o + 4 <= win.Length; o += 4)
+                if (IsCost(BitConverter.ToInt32(win, o), c)) { at = o - Win; break; }
+            if (at == int.MinValue) { all = false; break; }
+            where.Add((c, at));
+        }
+        if (all) arrays.Add((hit, where));
+    }
+    Console.WriteLine($"{arrays.Count} hit(s) have ALL {costs.Length} costs within ±0x{Win:X}:\n");
+    foreach (var f in arrays.Take(8))
+    {
+        var ordered = f.where.OrderBy(w => w.off).ToList();
+        var lo = ordered.First().off - 0x10; var hi = ordered.Last().off + 0x18;
+        Console.WriteLine($"★ COST CLUSTER near 0x{f.hit:X}  span 0x{hi - lo:X}");
+        foreach (var (c, off) in ordered)
+            Console.WriteLine($"     {c,6} @ 0x{f.hit + off:X}  (primary{(off >= 0 ? "+" : "")}0x{off:X})");
+        Console.WriteLine("   ── qword layout across the cluster ──");
+        DumpQwords(reader, f.hit + (lo & ~7), ((hi - (lo & ~7) + 15) & ~15), "     ");
+        for (var o = (lo & ~7); o + 8 <= hi; o += 8)   // item-entity check across the cluster
+        {
+            if (!reader.TryReadStruct<nint>(f.hit + o, out var q)) continue;
+            var r = AsItem(q);
+            if (r is { } it)
+            {
+                var ri = ResolveComponentAddr(reader, it.item, "RenderItem");
+                var art = ri == 0 ? "" : ItemArtBasename(reader.ReadStringUtf16(SafePtr(reader, ri + Poe2.RenderItemComponent.ResourcePath), 128)) ?? "";
+                Console.WriteLine($"        → +0x{o:X} item=0x{it.item:X} {art}  {it.meta}");
+            }
+        }
+        Console.WriteLine();
+    }
+    if (arrays.Count == 0)
+        Console.WriteLine("No all-five cluster — costs may be far apart or stored as floats. See item-pointer pass below.\n");
+
+    // Secondary: also report any primary hit with an item entity nearby (direct or one indirection).
+    Console.WriteLine("── primary hits with an item entity within ±0x300 ──");
+
+    // Resolve a candidate qword to a Metadata/Items entity, directly or via one dereference (slot struct
+    // whose +0x00 is the Item entity, like InventoryItemStruct).
+    (nint item, string meta)? AsItem(nint cand)
+    {
+        if ((ulong)cand is < 0x10000 or > 0x7FFFFFFFFFFF) return null;
+        var m = ReadEntityMetadata(reader, cand);
+        if (m.StartsWith("Metadata/Items", StringComparison.Ordinal)) return (cand, m);
+        var inner = SafePtr(reader, cand);
+        if ((ulong)inner is >= 0x10000 and <= 0x7FFFFFFFFFFF)
+        {
+            var mi = ReadEntityMetadata(reader, inner);
+            if (mi.StartsWith("Metadata/Items", StringComparison.Ordinal)) return (inner, mi);
+        }
+        return null;
+    }
+
+    // A reward descriptor must reference the item to render its tile — via either an item Entity OR a
+    // descriptive STRING (metadata path "Metadata/Items/…", icon art "Art/2DItems/…", or the base-type
+    // name). For each primary cost hit, scan ±0x400 for a pointer to such a string (UTF-8 or UTF-16) or
+    // an item entity. That string is the bridge to identifying & pricing the reward.
+    bool Interesting(string? s) => !string.IsNullOrEmpty(s) && s.Length >= 6 &&
+        (s.Contains("Metadata/Items", StringComparison.Ordinal) || s.Contains("Art/", StringComparison.Ordinal) ||
+         s.Contains("2DItems", StringComparison.Ordinal) || s.Contains(".dds", StringComparison.OrdinalIgnoreCase));
+
+    var promising = 0;
+    foreach (var hit in hits)
+    {
+        const int half = 0x400;
+        var win = new byte[half * 2];
+        var baseAddr = hit - half;
+        if (reader.TryReadBytes(baseAddr, win) < win.Length) continue;
+
+        var notes = new List<string>();
+        for (var o = 0; o + 8 <= win.Length; o += 8)
+        {
+            var q = (nint)BitConverter.ToInt64(win, o);
+            if ((ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+            var it = AsItem(q);
+            if (it is { } i) { notes.Add($"+0x{o - half:X} itemEntity 0x{i.item:X} {i.meta}"); continue; }
+            var s8 = reader.ReadStringUtf8(q, 96);
+            if (Interesting(s8)) { notes.Add($"+0x{o - half:X} str8→\"{s8}\""); continue; }
+            var s16 = reader.ReadStringUtf16(q, 96);
+            if (Interesting(s16)) { notes.Add($"+0x{o - half:X} str16→\"{s16}\""); }
+        }
+        if (notes.Count == 0) continue;
+        promising++;
+        if (promising > 30) { Console.WriteLine("(>30 promising — stopping)"); break; }
+        Console.WriteLine($"── cost@0x{hit:X} has {notes.Count} item/art reference(s) within ±0x{half:X}:");
+        foreach (var nt in notes.Take(8)) Console.WriteLine($"     {nt}");
+    }
+    Console.WriteLine($"\n{promising} cost hit(s) had an item/art/metadata reference nearby.");
+    if (promising == 0) Console.WriteLine("None — reward descriptor doesn't keep an art/metadata string within ±0x400 of the cost.");
+    return 0;
+}
+
+// Dump qwords with offsets; annotate ones that look like heap pointers.
+static void DumpQwords(MemoryReader reader, nint addr, int span, string label)
+{
+    var buf = new byte[span];
+    if (reader.TryReadBytes(addr, buf) < span) return;
+    for (var o = 0; o + 8 <= span; o += 8)
+    {
+        var q = BitConverter.ToInt64(buf, o);
+        var lo = (int)(q & 0xFFFFFFFF); var hi = (int)(q >> 32);
+        var ptr = (ulong)q is >= 0x10000 and <= 0x7FFFFFFFFFFF ? " <ptr>" : "";
+        Console.WriteLine($"{label}+0x{o - 0x40:+0x0;-0x0;0} 0x{addr + o:X}: q=0x{q:X16} (i32 {lo,11} {hi,11}){ptr}");
+    }
+}
+
+// ── Heap UTF-16 substring finder + back-references: --findwstr "text". Finds every occurrence of the
+// wide string, then scans the heap for pointers AT each occurrence (back-refs) so we can climb from the
+// reward NAME string to the record that owns it (the bridge from item identity → reward data).
+static int RunFindWStr(ProcessHandle process, MemoryReader reader, string needle)
+{
+    var pat = System.Text.Encoding.Unicode.GetBytes(needle);
+    Console.WriteLine($"Scanning heap for UTF-16 \"{needle}\" ({pat.Length} bytes)…\n");
+    var buf = new byte[1 << 20];
+    var hits = new List<nint>();
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+    {
+        for (long o = 0; o < regSize && hits.Count < 5000; o += buf.Length - pat.Length)
+        {
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            for (var i = 0; i + pat.Length <= got; i += 2)
+            {
+                var m = true;
+                for (var j = 0; j < pat.Length; j++) if (buf[i + j] != pat[j]) { m = false; break; }
+                if (m) hits.Add(regBase + (nint)(o + i));
+            }
+        }
+    }
+    Console.WriteLine($"{hits.Count} occurrence(s):");
+    foreach (var h in hits.Take(40))
+    {
+        var full = reader.ReadStringUtf16(h, 80);
+        Console.WriteLine($"  @0x{h:X}  \"{full}\"");
+    }
+    if (hits.Count == 0) { Console.WriteLine("(none — name not present as UTF-16 in private heap)"); return 0; }
+
+    // Back-references: who points at (near) the first few occurrences?
+    Console.WriteLine("\nBack-references (pointers into the string / its container) for the first 3 hits:");
+    var targets = hits.Take(3).ToHashSet();
+    var lows = targets.Select(t => (long)t - 0x40).ToArray();
+    var found = 0;
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+    {
+        for (long o = 0; o < regSize && found < 60; o += buf.Length - 8)
+        {
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            for (var i = 0; i + 8 <= got; i += 8)
+            {
+                var q = BitConverter.ToInt64(buf, i);
+                foreach (var t in targets)
+                    if (q >= (long)t - 0x40 && q <= (long)t + 8)
+                    { Console.WriteLine($"  ptr@0x{regBase + (nint)(o + i):X} → 0x{q:X} (near \"{needle}\" @0x{t:X})"); found++; break; }
+            }
+        }
+    }
+    if (found == 0) Console.WriteLine("  (no back-references — string may be inline in a struct, not pointed to)");
+    return 0;
+}
+
+// ── End-to-end test of the shipped Core read path: --ritual-shop. Calls Poe2Live.ReadRitualRewards (the
+// exact method the overlay uses) and prints each resolved reward's rarity/art/name + screen rect. Validates
+// the signature-gated grid walk without needing the overlay. Run with the tribute shop open.
+static int RunRitualShop(ProcessHandle process, MemoryReader reader)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("no GameState (in game?)"); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out var igs, out _, out _)) { Console.Error.WriteLine("no InGameState"); return 1; }
+    float winW = 2560, winH = 1600; var hwnd = Win.FindMainWindowForPid((uint)process.ProcessId);
+    if (hwnd != 0 && Win.GetClientRect(hwnd, out var rc) && rc.right > 0) { winW = rc.right; winH = rc.bottom; }
+
+    var rewards = live.ReadRitualRewards(igs, winW, winH);
+    Console.WriteLine($"window {winW}x{winH} — ReadRitualRewards returned {rewards.Count} reward(s):\n");
+    foreach (var r in rewards)
+        Console.WriteLine($"  {r.Rarity,-7} {(r.Identified ? "ID  " : "unID")} art={r.Art,-22} name=\"{r.Name}\"  rect=({r.X:0},{r.Y:0} {r.W:0}x{r.H:0})");
+    if (rewards.Count == 0) Console.WriteLine("(none — is the tribute shop open? signature text not found, or grid walk failed)");
+    return 0;
+}
+
+// ── Raw element/struct qword dumper: --eldump 0xADDR [--span N]. Every qword annotated with item-entity /
+// string / small-int (cost candidate). Used to find the tribute-cost field offset within a reward tile.
+static int RunElDump(MemoryReader reader, nint addr, int span)
+{
+    var win = new byte[span];
+    if (reader.TryReadBytes(addr, win) < span) { Console.WriteLine("(unreadable)"); return 1; }
+    for (var o = 0; o + 8 <= span; o += 8)
+    {
+        var q = (nint)BitConverter.ToInt64(win, o);
+        string note = "";
+        if ((ulong)q is >= 0x10000 and <= 0x7FFFFFFFFFFF)
+        {
+            var meta = ReadEntityMetadata(reader, q);
+            if (meta.StartsWith("Metadata/Items", StringComparison.Ordinal)) note = $"  →itemEntity {meta}";
+            else { var s = reader.ReadStringUtf16(q, 48); if (!string.IsNullOrEmpty(s) && s.Length >= 4 && s.All(c => c >= ' ' || c == '\n' || c == '\r')) note = $"  →str \"{s.Replace("\n", "/")}\""; else note = " <ptr>"; }
+        }
+        else
+        {
+            var i0 = (int)((long)q & 0xFFFFFFFF); var i1 = (int)((long)q >> 32);
+            if (i0 is > 0 and < 1_000_000) note += $"  i0={i0}";
+            if (i1 is > 0 and < 1_000_000) note += $"  i1={i1}";
+        }
+        Console.WriteLine($"  +0x{o:X3}  0x{addr + o:X}  q=0x{q:X16}{note}");
+    }
+    return 0;
+}
+
+// ── Hovered-tooltip item capture: --tooltip-capture. Fast UI-tree-ONLY walk (no heap scan, so it catches
+// a transient tooltip). For every UiElement, scan its body for a pointer (direct or one deref) to a
+// Metadata/Items entity and print art/rarity/identified + rendered mods + the element's text. Hover a
+// ritual reward and run this: the tooltip's real item entity (the bridge to pricing) falls out, and its
+// address feeds a follow-up reference-scan for the full 5-offer list.
+static int RunTooltipCapture(ProcessHandle process, MemoryReader reader)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("no GameState (in game?)"); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out var igs, out _, out _)) { Console.Error.WriteLine("no InGameState"); return 1; }
+    var gameUi = SafePtr(reader, igs + Poe2.InGameState.UiRoot);
+    if (gameUi == 0) { Console.Error.WriteLine("no GameUi"); return 1; }
+    Console.WriteLine($"GameUi 0x{gameUi:X} — walking UI tree for item entities…\n");
+
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+    var visited = new HashSet<nint>();
+    var seenItems = new HashSet<nint>();
+    var stack = new Stack<(nint el, int depth)>();
+    stack.Push((gameUi, 0));
+    var nodes = 0; var found = 0;
+
+    // Resolve a qword to a Metadata/Items entity, directly or via one dereference.
+    (nint item, string meta)? AsItem(nint cand)
+    {
+        if ((ulong)cand is < 0x10000 or > 0x7FFFFFFFFFFF) return null;
+        var m = ReadEntityMetadata(reader, cand);
+        if (m.StartsWith("Metadata/Items", StringComparison.Ordinal)) return (cand, m);
+        var inner = SafePtr(reader, cand);
+        if ((ulong)inner is >= 0x10000 and <= 0x7FFFFFFFFFFF)
+        {
+            var mi = ReadEntityMetadata(reader, inner);
+            if (mi.StartsWith("Metadata/Items", StringComparison.Ordinal)) return (inner, mi);
+        }
+        return null;
+    }
+
+    while (stack.Count > 0 && nodes < 400_000)
+    {
+        var (el, depth) = stack.Pop();
+        if (el == 0 || !visited.Add(el) || depth > 80) continue;
+        nodes++;
+        reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags);
+        var txt = ReadStdWString(reader, el + 0x390);
+
+        var body = new byte[0x600];
+        if (reader.TryReadBytes(el, body) >= body.Length)
+            for (var o = 0x10; o + 8 <= body.Length; o += 8)
+            {
+                var cand = (nint)BitConverter.ToInt64(body, o);
+                var it = AsItem(cand);
+                if (it is not { } item || !seenItems.Add(item.item)) continue;
+                var ri = ResolveComponentAddr(reader, item.item, "RenderItem");
+                var art = ri == 0 ? "" : ItemArtBasename(reader.ReadStringUtf16(SafePtr(reader, ri + Poe2.RenderItemComponent.ResourcePath), 128)) ?? "";
+                var mods = ResolveComponentAddr(reader, item.item, "Mods");
+                var rarity = -1; var ident = -1;
+                if (mods != 0) { reader.TryReadStruct<int>(mods + Poe2.ModsComponent.Rarity, out rarity); reader.TryReadStruct<int>(mods + Poe2.ModsComponent.Identified, out ident); }
+                var rar = rarity switch { 0 => "Normal", 1 => "Magic", 2 => "Rare", 3 => "Unique", _ => $"r{rarity}" };
+                found++;
+                Console.WriteLine($"ITEM 0x{item.item:X}  {rar} {(ident == 1 ? "ID" : ident == 0 ? "unID" : "id?")}  art={art}");
+                Console.WriteLine($"   meta: {item.meta}");
+                Console.WriteLine($"   via element 0x{el:X} (+0x{o:X}) d{depth} vis={(flags & VisMask) != 0}{(string.IsNullOrEmpty(txt) ? "" : $" text=\"{txt.Replace("\n", " / ")}\"")}");
+                Console.WriteLine($"   components: {string.Join(", ", ComponentNames(reader, item.item).OrderBy(s => s, StringComparer.Ordinal))}");
+                if (mods != 0)
+                    foreach (var (kind, moff) in new[] { ("implicit", 0xA0), ("explicit", 0xB8), ("enchant", 0xD0) })
+                    {
+                        var ids = ReadItemModIds(reader, mods + moff);
+                        if (ids.Count > 0) Console.WriteLine($"   {kind}: {string.Join(" | ", ids)}");
+                    }
+                Console.WriteLine();
+            }
+
+        if (RfChildren(reader, el, out var first, out var n))
+            for (long i = 0; i < n; i++)
+                stack.Push((SafePtr(reader, first + (nint)(i * 8)), depth + 1));
+    }
+    Console.WriteLine($"walked {nodes} elements; {found} distinct item entit{(found == 1 ? "y" : "ies")} reachable from the UI tree.");
+    if (found == 0) Console.WriteLine("(none — hover a reward so its tooltip is up, then re-run)");
+    return 0;
+}
+
+// ── Ritual reward offer-list RE: --ritual-rewards [--reward NAME]. The reward TILES carry no item ptr
+// (confirmed: not in the UI tree, not in any ServerData PlayerInventory). The offers live in a server/data
+// list of records, each pointing to a display label "Unique\nBase" (e.g. "Venopuncture\nIron Ring"). We
+// anchor on ONE known reward's display label, find every pointer to it (= a record field), and dump each
+// record + its neighbours so the array (5 rewards in slot order) + the tribute-cost field fall out. Run
+// with the ritual shop OPEN; pass --reward <UniqueName> for the current ritual's set (default Venopuncture).
+static int RunRitualRewards(ProcessHandle process, MemoryReader reader, string needle)
+{
+    var pat = System.Text.Encoding.Unicode.GetBytes(needle);
+    var buf = new byte[1 << 20];
+
+    // 1) Find the display-label string(s): UTF-16 occurrences of `needle` whose full string spans a newline.
+    var labelAddrs = new List<nint>();
+    var occ = 0;
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+        for (long o = 0; o < regSize && occ < 20000; o += buf.Length - pat.Length)
+        {
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            for (var i = 0; i + pat.Length <= got; i += 2)
+            {
+                var m = true;
+                for (var j = 0; j < pat.Length; j++) if (buf[i + j] != pat[j]) { m = false; break; }
+                if (!m) continue;
+                occ++;
+                var a = regBase + (nint)(o + i);
+                if (reader.ReadStringUtf16(a, 80).Contains('\n')) labelAddrs.Add(a);
+            }
+        }
+    Console.WriteLine($"\"{needle}\": {occ} occurrence(s), {labelAddrs.Count} display-label (newline) form(s):");
+    foreach (var a in labelAddrs) Console.WriteLine($"  label @0x{a:X}  \"{reader.ReadStringUtf16(a, 80).Replace("\n", " / ")}\"");
+    // Fallback: when the needle isn't a "Unique\nBase" label (e.g. a ".dds" icon path or a bare unique
+    // name), anchor on ALL occurrences so we can still back-ref the record that owns the icon/name.
+    if (labelAddrs.Count == 0)
+    {
+        Console.WriteLine("(no newline form — anchoring on ALL occurrences instead)");
+        foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+            for (long o = 0; o < regSize && labelAddrs.Count < 64; o += buf.Length - pat.Length)
+            {
+                var want = (int)Math.Min(buf.Length, regSize - o);
+                var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+                if (got <= 0) continue;
+                for (var i = 0; i + pat.Length <= got && labelAddrs.Count < 64; i += 2)
+                {
+                    var m = true;
+                    for (var j = 0; j < pat.Length; j++) if (buf[i + j] != pat[j]) { m = false; break; }
+                    if (m) labelAddrs.Add(regBase + (nint)(o + i));
+                }
+            }
+        foreach (var a in labelAddrs) Console.WriteLine($"  occ @0x{a:X}  \"{reader.ReadStringUtf16(a, 48)}\"");
+    }
+    if (labelAddrs.Count == 0) { Console.WriteLine("(nothing found — is the ritual shop open?)"); return 0; }
+
+    // Annotate a qword that points to ANY display label (newline + printable) — reveals sibling rewards.
+    string? LabelAt(nint q)
+    {
+        if ((ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF) return null;
+        var s = reader.ReadStringUtf16(q, 80);
+        if (s.Length >= 6 && s.Contains('\n') && s.All(c => c >= ' ' || c == '\n' || c == '\r')) return s.Replace("\n", " / ").Replace("\r", "");
+        return null;
+    }
+
+    // 2) Back-reference scan: heap pointers whose value is exactly a label addr (= a record's name field).
+    var targets = labelAddrs.ToHashSet();
+    var backrefs = new List<(nint at, nint to)>();
+    foreach (var (regBase, regSize) in process.EnumerateReadableRegions(privateOnly: true, excludeImage: true))
+        for (long o = 0; o < regSize && backrefs.Count < 4000; o += buf.Length - 8)
+        {
+            var want = (int)Math.Min(buf.Length, regSize - o);
+            var got = reader.TryReadBytes(regBase + (nint)o, buf.AsSpan(0, want));
+            if (got <= 0) continue;
+            for (var i = 0; i + 8 <= got; i += 8)
+                if (targets.Contains((nint)BitConverter.ToInt64(buf, i))) backrefs.Add((regBase + (nint)(o + i), (nint)BitConverter.ToInt64(buf, i)));
+        }
+    Console.WriteLine($"\n{backrefs.Count} pointer(s) to a label. Dumping each record + neighbours (±0x80/0x180):");
+
+    // 3) For each back-ref, dump the surrounding record; annotate label/dds/item-entity/int-cost candidates.
+    foreach (var (at, to) in backrefs.Take(10))
+    {
+        Console.WriteLine($"\n── field @0x{at:X} → label 0x{to:X} (\"{reader.ReadStringUtf16(to, 80).Replace("\n", " / ")}\") ──");
+        const int span = 0x200; var lo = at - 0x80;
+        var win = new byte[span];
+        if (reader.TryReadBytes(lo, win) < span) { Console.WriteLine("   (unreadable)"); continue; }
+        var labelsHere = 0;
+        for (var o = 0; o + 8 <= span; o += 8)
+        {
+            var q = (nint)BitConverter.ToInt64(win, o);
+            var rel = (long)(lo + o) - at;
+            var relS = (rel >= 0 ? "+" : "-") + "0x" + Math.Abs(rel).ToString("X");
+            var lab = LabelAt(q);
+            if (lab != null) { Console.WriteLine($"   @0x{lo + o:X} ({relS,7})  →LABEL \"{lab}\""); labelsHere++; continue; }
+            if ((ulong)q is >= 0x10000 and <= 0x7FFFFFFFFFFF)
+            {
+                var s16 = reader.ReadStringUtf16(q, 64);
+                if (!string.IsNullOrEmpty(s16) && (s16.Contains(".dds") || s16.Contains("Art/") || s16.Contains("Metadata")))
+                { Console.WriteLine($"   @0x{lo + o:X} ({relS,7})  →str \"{s16}\""); continue; }
+                var meta = ReadEntityMetadata(reader, q);
+                if (meta.StartsWith("Metadata/Items", StringComparison.Ordinal))
+                { Console.WriteLine($"   @0x{lo + o:X} ({relS,7})  →itemEntity {meta}"); continue; }
+            }
+            var i0 = (int)((long)q & 0xFFFFFFFF); var i1 = (int)((long)q >> 32);
+            var note = (i0 is > 0 and < 1_000_000 ? $" int0={i0}" : "") + (i1 is > 0 and < 1_000_000 ? $" int1={i1}" : "");
+            var pp = (ulong)q is >= 0x10000 and <= 0x7FFFFFFFFFFF ? " <ptr>" : "";
+            Console.WriteLine($"   @0x{lo + o:X} ({relS,7})  q=0x{q:X16}{pp}{note}");
+        }
+        if (labelsHere >= 2) Console.WriteLine($"   ★ {labelsHere} reward labels in this window — likely the offer array.");
+    }
+    return 0;
+}
+
+// ── Generic UI subtree + ancestor dumper: --subtree 0xADDR [--up N] [--down N]. Prints the ancestor
+// chain (child counts + indices = the fingerprint trail) and the full subtree with each element's rect,
+// flags, text, and any item-identity reference (item Entity ptr / "Art/2DItems" icon DDS / metadata).
+static int RunSubtree(ProcessHandle process, MemoryReader reader, nint root, int up, int down)
+{
+    float winW = 2560, winH = 1600; var hwnd = Win.FindMainWindowForPid((uint)process.ProcessId);
+    if (hwnd != 0 && Win.GetClientRect(hwnd, out var rc) && rc.right > 0) { winW = rc.right; winH = rc.bottom; }
+    float v1 = winW / 2560f, v2 = winH / 1600f;
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+
+    (float x, float y, float w, float h) Rect(nint el)
+    {
+        var (ux, uy) = RfUnscaledPos(reader, el, 0);
+        reader.TryReadStruct<float>(el + 0x288, out var w); reader.TryReadStruct<float>(el + 0x28C, out var h);
+        reader.TryReadStruct<byte>(el + 0x18A, out var sidx);
+        var (sx, sy) = sidx switch { 1 => (v1, v1), 3 => (v1, v2), _ => (v2, v2) };
+        return (ux * sx, uy * sy, w * sx, h * sy);
+    }
+    bool InterestingStr(string? s) => !string.IsNullOrEmpty(s) && s.Length >= 5 &&
+        (s.Contains("2DItems", StringComparison.OrdinalIgnoreCase) || s.Contains("Metadata/Items", StringComparison.Ordinal)
+         || s.Contains("Art/", StringComparison.Ordinal) || s.EndsWith(".dds", StringComparison.OrdinalIgnoreCase));
+    void Probe(nint q, string pad, int hop, HashSet<nint> seen)
+    {
+        if (hop > 2 || (ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF || !seen.Add(q)) return;
+        var meta = ReadEntityMetadata(reader, q);
+        if (meta.StartsWith("Metadata/Items", StringComparison.Ordinal)) { Console.WriteLine($"{pad}  hop{hop} 0x{q:X} itemEntity {meta}"); return; }
+        var s16 = reader.ReadStringUtf16(q, 120); if (InterestingStr(s16)) { Console.WriteLine($"{pad}  hop{hop} 0x{q:X} str16→\"{s16}\""); return; }
+        var s8 = reader.ReadStringUtf8(q, 120); if (InterestingStr(s8)) { Console.WriteLine($"{pad}  hop{hop} 0x{q:X} str8→\"{s8}\""); return; }
+    }
+    void Identity(nint el, string pad)
+    {
+        var body = new byte[0x300];
+        if (reader.TryReadBytes(el, body) < body.Length) return;
+        var seen = new HashSet<nint>();
+        for (var o = 0x10; o + 8 <= body.Length; o += 8)
+        {
+            var q = (nint)BitConverter.ToInt64(body, o);
+            if ((ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+            Probe(q, pad, 1, seen);
+            // one more hop: follow the first few qwords of the target
+            var inner = new byte[0x40];
+            if (reader.TryReadBytes(q, inner) >= inner.Length)
+                for (var k = 0; k + 8 <= inner.Length; k += 8)
+                    Probe((nint)BitConverter.ToInt64(inner, k), pad, 2, seen);
+        }
+    }
+
+    // Ancestors (root → up).
+    Console.WriteLine($"ANCESTORS of 0x{root:X}:");
+    var cur = root; var chain = new List<string>();
+    for (var i = 0; i < up; i++)
+    {
+        var parent = SafePtr(reader, cur + Poe2.UiElement.Parent);
+        if (parent == 0) break;
+        reader.TryReadStruct<uint>(parent + Poe2.UiElement.Flags, out var pf);
+        var idx = -1; var cc = 0L;
+        if (RfChildren(reader, parent, out var first, out var n)) { cc = n; for (long k = 0; k < n; k++) if (SafePtr(reader, first + (nint)(k * 8)) == cur) { idx = (int)k; break; } }
+        chain.Add($"  ↑ 0x{parent:X} flags=0x{pf & ~VisMask:X} children={cc} (this=child[{idx}])");
+        cur = parent;
+    }
+    foreach (var c in chain) Console.WriteLine(c);
+
+    // Subtree (root → down).
+    Console.WriteLine($"\nSUBTREE of 0x{root:X} (depth {down}):");
+    void Walk(nint el, int depth)
+    {
+        if (el == 0 || depth > down) return;
+        reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var fl);
+        var (x, y, w, h) = Rect(el);
+        var txt = ReadStdWString(reader, el + 0x390);
+        var pad = new string(' ', depth * 2);
+        Console.WriteLine($"{pad}• 0x{el:X} d{depth} flags=0x{fl & ~VisMask:X} vis={(fl & VisMask) != 0} rect=({x:0},{y:0} {w:0}x{h:0}) {(string.IsNullOrEmpty(txt) ? "" : $"text=\"{txt}\"")}");
+        Identity(el, pad);
+        if (RfChildren(reader, el, out var first, out var n))
+            for (long i = 0; i < n && i < 40; i++) Walk(SafePtr(reader, first + (nint)(i * 8)), depth + 1);
+    }
+    Walk(root, 0);
+    return 0;
+}
+
+// ── Hovered-tile finder: project every visible UiElement to a screen rect (runeforge projection) and
+// report every element whose rect contains the cursor, innermost (smallest) first. Hover a reward tile
+// and run: the hovered tile + its parent grid + sibling tiles fall out of the nesting, and for each we
+// show how the item identity is stored (item Entity ptr / "Art/2DItems" icon DDS / inline text).
+static int RunTributeHover(ProcessHandle process, MemoryReader reader)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("no GameState"); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out var igs, out _, out _)) { Console.Error.WriteLine("no InGameState"); return 1; }
+    var gameUi = SafePtr(reader, igs + Poe2.InGameState.UiRoot);
+    if (gameUi == 0) { Console.Error.WriteLine("no GameUi"); return 1; }
+
+    // Use PoE2's own window (NOT the foreground — that's this console), so the rect math is in game space.
+    float winW = 2560, winH = 1600; var hwnd = Win.FindMainWindowForPid((uint)process.ProcessId);
+    if (hwnd != 0 && Win.GetClientRect(hwnd, out var rc) && rc.right > 0) { winW = rc.right; winH = rc.bottom; }
+    Win.POINT cur = default; Win.GetCursorPos(out cur); if (hwnd != 0) Win.ScreenToClient(hwnd, ref cur);
+    float v1 = winW / 2560f, v2 = winH / 1600f;
+    Console.WriteLine($"GameUi 0x{gameUi:X}  poe2Hwnd=0x{hwnd:X}  window {winW}x{winH}  cursor(client)=({cur.X},{cur.Y})\n");
+
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+    var hitsUnderCursor = new List<(nint el, int depth, float x, float y, float w, float h, float area)>();
+    var visited = new HashSet<nint>();
+    var stack = new Stack<(nint el, int depth)>();
+    stack.Push((gameUi, 0));
+    var nodes = 0;
+    while (stack.Count > 0 && nodes < 300_000)
+    {
+        var (el, depth) = stack.Pop();
+        if (el == 0 || !visited.Add(el) || depth > 80) continue;
+        nodes++;
+        reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags);
+        var visible = (flags & VisMask) != 0;
+        if (visible)
+        {
+            var (ux, uy) = RfUnscaledPos(reader, el, 0);
+            reader.TryReadStruct<float>(el + 0x288, out var usw);
+            reader.TryReadStruct<float>(el + 0x28C, out var ush);
+            reader.TryReadStruct<byte>(el + 0x18A, out var sidx);
+            var (sx, sy) = sidx switch { 1 => (v1, v1), 3 => (v1, v2), _ => (v2, v2) };
+            float x = ux * sx, y = uy * sy, w = usw * sx, h = ush * sy;
+            if (w > 0 && h > 0 && cur.X >= x && cur.X <= x + w && cur.Y >= y && cur.Y <= y + h)
+                hitsUnderCursor.Add((el, depth, x, y, w, h, w * h));
+        }
+        if (RfChildren(reader, el, out var first, out var n))
+            for (long i = 0; i < n; i++)
+                stack.Push((SafePtr(reader, first + (nint)(i * 8)), depth + 1));
+    }
+    hitsUnderCursor.Sort((a, b) => a.area.CompareTo(b.area));
+    Console.WriteLine($"walked {nodes}; {hitsUnderCursor.Count} visible element(s) under cursor (innermost first):\n");
+    foreach (var h in hitsUnderCursor.Take(18))
+    {
+        reader.TryReadStruct<uint>(h.el + Poe2.UiElement.Flags, out var fl);
+        var txt = ReadStdWString(reader, h.el + 0x390);
+        Console.WriteLine($"• 0x{h.el:X} d{h.depth} flags=0x{fl & ~VisMask:X} rect=({h.x:0},{h.y:0} {h.w:0}x{h.h:0})  text=\"{txt}\"");
+        // Identity hunt: item Entity ptr or 2DItems icon DDS reachable from the body.
+        var body = new byte[0x380];
+        if (reader.TryReadBytes(h.el, body) >= body.Length)
+            for (var o = 0x18; o + 8 <= body.Length; o += 8)
+            {
+                var q = (nint)BitConverter.ToInt64(body, o);
+                if ((ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+                var meta = ReadEntityMetadata(reader, q);
+                if (meta.StartsWith("Metadata/Items", StringComparison.Ordinal))
+                { Console.WriteLine($"      +0x{o:X} itemEntity 0x{q:X} {meta}"); continue; }
+                var s16 = reader.ReadStringUtf16(q, 110);
+                if (!string.IsNullOrEmpty(s16) && (s16.Contains("2DItems", StringComparison.OrdinalIgnoreCase) || s16.Contains("Metadata/Items", StringComparison.Ordinal)))
+                    Console.WriteLine($"      +0x{o:X} str→\"{s16}\"");
+            }
+        var pAddr = SafePtr(reader, h.el + Poe2.UiElement.Parent);
+        if (pAddr != 0 && RfChildren(reader, pAddr, out _, out var pn))
+            Console.WriteLine($"      parent 0x{pAddr:X} (children={pn})");
+    }
+    return 0;
+}
+
+// ── Reward TILE finder: walk the UI tree, follow each element's body pointers one hop, and report any
+// element that reaches a struct containing a known tribute cost (or an item-icon art string). This links
+// the reward tile UiElement → its server reward record (cost + item ref), since blind cost-scanning
+// showed the cost is neither an array nor adjacent to the item. Run with the tribute shop open.
+static int RunTributeTiles(ProcessHandle process, MemoryReader reader, string costsCsv)
+{
+    var costs = costsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Select(s => int.TryParse(s, out var n) ? n : -1).Where(n => n > 0).ToHashSet();
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("no GameState"); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out var igs, out _, out _)) { Console.Error.WriteLine("no InGameState"); return 1; }
+    var gameUi = SafePtr(reader, igs + Poe2.InGameState.UiRoot);
+    if (gameUi == 0) { Console.Error.WriteLine("no GameUi"); return 1; }
+    Console.WriteLine($"GameUi 0x{gameUi:X}  costs=[{string.Join(",", costs)}]\n");
+
+    bool HasCost(ReadOnlySpan<byte> b)
+    {
+        for (var o = 0; o + 4 <= b.Length; o += 4) if (costs.Contains(BitConverter.ToInt32(b[o..]))) return true;
+        return false;
+    }
+    int WhichCost(ReadOnlySpan<byte> b, out int off)
+    {
+        for (var o = 0; o + 4 <= b.Length; o += 4) { var v = BitConverter.ToInt32(b[o..]); if (costs.Contains(v)) { off = o; return v; } }
+        off = -1; return -1;
+    }
+
+    var visited = new HashSet<nint>();
+    var stack = new Stack<(nint el, int depth)>();
+    stack.Push((gameUi, 0));
+    var nodes = 0; var found = 0;
+    var elBody = new byte[0x380];
+    var recBody = new byte[0x100];
+    while (stack.Count > 0 && nodes < 300_000)
+    {
+        var (el, depth) = stack.Pop();
+        if (el == 0 || !visited.Add(el) || depth > 80) continue;
+        nodes++;
+
+        if (reader.TryReadBytes(el, elBody) >= elBody.Length)
+        {
+            // (a) cost directly in the element body?
+            if (HasCost(elBody))
+            {
+                WhichCost(elBody, out var off);
+                ReportTile(reader, el, depth, $"cost in body @+0x{off:X}");
+                found++;
+            }
+            else
+            {
+                // (b) follow each body pointer one hop; does the target struct hold a cost?
+                for (var o = 0x18; o + 8 <= elBody.Length; o += 8)
+                {
+                    var q = (nint)BitConverter.ToInt64(elBody, o);
+                    if ((ulong)q is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+                    if (reader.TryReadBytes(q, recBody) < recBody.Length) continue;
+                    if (!HasCost(recBody)) continue;
+                    WhichCost(recBody, out var roff);
+                    ReportTile(reader, el, depth, $"body+0x{o:X} → record 0x{q:X} (cost @rec+0x{roff:X})");
+                    DumpQwords(reader, q, 0x80, "        ");
+                    found++;
+                    break;
+                }
+            }
+        }
+
+        if (RfChildren(reader, el, out var first, out var n))
+            for (long i = 0; i < n; i++)
+                stack.Push((SafePtr(reader, first + (nint)(i * 8)), depth + 1));
+    }
+    Console.WriteLine($"\nwalked {nodes} elements; {found} tile/record hit(s).");
+    if (found == 0) Console.WriteLine("No UI element reaches a cost within one hop. The cost may be ≥2 hops from the tile, " +
+                                      "or rendered from a server record not pointed to directly by the UiElement.");
+    return 0;
+}
+
+static void ReportTile(MemoryReader reader, nint el, int depth, string note)
+{
+    reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags);
+    var txt = ReadStdWString(reader, el + 0x390);
+    DumpUiEl(reader, el, depth, flags, $"{note}  text=\"{txt}\"");
+    DumpAncestors(reader, el);
+}
+
+static bool IsMostlyPrintable(string s)
+{
+    if (string.IsNullOrEmpty(s)) return false;
+    var ok = 0; foreach (var c in s) if (c is >= ' ' and <= '~' || c > 127) ok++;
+    return ok >= s.Length - 1;
+}
+
+static void DumpUiEl(MemoryReader reader, nint el, int depth, uint flags, string note)
+{
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+    reader.TryReadStruct<float>(el + 0x118, out var rx);
+    reader.TryReadStruct<float>(el + 0x11C, out var ry);
+    reader.TryReadStruct<float>(el + 0x288, out var sw);
+    reader.TryReadStruct<float>(el + 0x28C, out var sh);
+    Console.WriteLine($"\n• 0x{el:X} d{depth} flags=0x{flags:X8} (masked 0x{flags & ~VisMask:X}) vis={(flags & VisMask) != 0} "
+                    + $"relPos=({rx:0.#},{ry:0.#}) size=({sw:0.#}x{sh:0.#})  {note}");
+}
+
+// Walk Parent (+0xB8) up to the root, printing each ancestor's addr / masked-flags / child count and
+// this node's index within it — the fingerprint trail for a resolve walk.
+static void DumpAncestors(MemoryReader reader, nint el)
+{
+    const uint VisMask = 1u << Poe2.UiElement.FlagVisibleBit;
+    var cur = el; var guard = 0;
+    while (guard++ < 40)
+    {
+        var parent = SafePtr(reader, cur + Poe2.UiElement.Parent);
+        if (parent == 0) break;
+        reader.TryReadStruct<uint>(parent + Poe2.UiElement.Flags, out var pf);
+        var idx = -1; var cc = 0L;
+        if (RfChildren(reader, parent, out var first, out var n))
+        {
+            cc = n;
+            for (long i = 0; i < n; i++) if (SafePtr(reader, first + (nint)(i * 8)) == cur) { idx = (int)i; break; }
+        }
+        Console.WriteLine($"      ↑ parent 0x{parent:X} flags=0x{pf & ~VisMask:X8} children={cc} (this is child[{idx}])");
+        cur = parent;
+    }
+}
+
+// Dump a component's first `span` bytes as a grid of little-endian int32s with byte offsets — the
+// quickest way to eyeball which scalar differs between two snapshots of the "same" component.
+static void DumpInts(MemoryReader reader, nint addr, int span, string label)
+{
+    var buf = new byte[span];
+    if (reader.TryReadBytes(addr, buf) < span) return;
+    for (var i = 0; i < span; i += 16)
+    {
+        var ints = string.Join(" ", Enumerable.Range(0, 4).Select(j => BitConverter.ToInt32(buf, i + j * 4).ToString().PadLeft(11)));
+        Console.WriteLine($"{label}+0x{i:X2}  {ints}");
+    }
+}
+
+// ── Monolith: validate the device→station chain that exposes hole count N + anchor rune ───────────
+// Ports GameHelper RunecraftHelper's MonolithRewards resolution to confirm the offsets live on OUR
+// patch. For each Expedition2Encounter device: device → StateMachine → listener vec (SM+0x20) →
+// station = *(node) − 0x98 (verified *(station+0x10)==device). Then station+0x38 = N (hole count),
+// station+0x28 = anchor rune row ptr, station+0x3c = anchor hole index, and the anchor rune index =
+// (rowPtr − tableBase)/0x6c with tableBase = *(*(station+0x30 + 0x28)). Stand near monoliths and run.
+static int RunMonolith(ProcessHandle process, MemoryReader reader)
+{
+    nint slot = 0;
+    foreach (var pat in AobPatterns.GameStateRefs)
+        foreach (var s in AobScanner.ScanForResolvedAddresses(process, reader, pat).Distinct())
+            if (new Poe2Live(reader, s).TryResolve(out _, out _, out _)) { slot = s; break; }
+    if (slot == 0) { Console.Error.WriteLine("Could not lock GameState slot (in game?)."); return 1; }
+    var live = new Poe2Live(reader, slot);
+    if (!live.TryResolve(out _, out var ai, out var lp)) { Console.Error.WriteLine("Could not resolve area."); return 1; }
+
+    var catalog = POE2Radar.Core.Game.RuneMonolithCatalog.Instance;
+    var areaLevel = live.AreaLevel(ai);
+    var pg = EntityGrid(reader, lp);
+    Console.WriteLine($"AreaInstance 0x{ai:X}  areaLevel={areaLevel}  catalogLoaded={catalog.IsLoaded}  player ({pg.X:F0},{pg.Y:F0})\n");
+
+    var devices = new List<(uint id, nint ent, float dist)>();
+    foreach (var (id, ent, meta) in WalkEntities(reader, ai))
+    {
+        if (meta.IndexOf("Expedition2Encounter", StringComparison.OrdinalIgnoreCase) < 0) continue;
+        var g = EntityGrid(reader, ent);
+        var d = g == default ? 9999f : (float)Math.Sqrt((g.X - pg.X) * (g.X - pg.X) + (g.Y - pg.Y) * (g.Y - pg.Y));
+        devices.Add((id, ent, d));
+    }
+    devices.Sort((a, b) => a.dist.CompareTo(b.dist));
+    Console.WriteLine($"{devices.Count} monolith device(s)\n");
+
+    foreach (var (id, device, dist) in devices)
+    {
+        var m = live.ReadMonolith(device);
+        Console.WriteLine($"── device id={id} @0x{device:X}  dist={dist:F0} ──");
+        if (!m.Resolved) { Console.WriteLine("   ✗ station not resolved (collected=" + m.Collected + ")"); continue; }
+
+        var kind = m.IsUnique ? "UNIQUE (anchor-less)"
+            : m.AnchorIdx >= 0 ? $"anchor={catalog.RuneName(m.AnchorIdx)} (idx {m.AnchorIdx}) @ hole {m.AnchorPos + 1}"
+            : "anchor decode FAILED";
+        Console.WriteLine($"   ✓ N={m.HoleCount} holes   {kind}   collected={m.Collected}");
+
+        var offers = catalog.Offers(m.AnchorIdx, m.AnchorPos, m.HoleCount, m.IsUnique, areaLevel);
+        Console.WriteLine($"   offers {offers.Count} recipe(s):");
+        foreach (var o in offers.Take(40))
+            Console.WriteLine($"     size{o.Size} x{o.Count,-2} {(string.IsNullOrEmpty(o.Name) ? "(" + o.Description + ")" : o.Name),-34} [{o.Runes}]");
+    }
+    return 0;
+}
+
+// ── Rune-dump: identify the in-world event object near the player ─────────────────────────────────
+// Answers "what tile / entity am I standing next to, and does the rune COUNT appear anywhere static?"
+// Stand at the event and run it; then go to an event with a DIFFERENT rune count and run it again. If
+// the tile path AND the object metadata path are identical across counts, the count is NOT encoded in
+// any static path (it's a server-side roll → only readable from the open panel / a live component), so
+// the tile/POI locator is count-blind by construction. The per-component small-int scan flags any field
+// on the object holding a value in 1..12 — a candidate "number of recipes/slots" that would let us
+// color the icon the moment it's in range (before opening the panel).
+static int RunRuneDump(ProcessHandle process, MemoryReader reader, int radiusGrid)
+{
+    var (_, _, ai, lp) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var pg = EntityGrid(reader, lp);
+    Console.WriteLine($"AreaInstance 0x{ai:X}  player grid ({pg.X:F0},{pg.Y:F0})  radius {radiusGrid} tiles\n");
+
+    // ── 1) ENTITIES near the player, nearest first ───────────────────────────────────────────────
+    var near = new List<(double dist, uint id, nint ent, string meta, System.Numerics.Vector2 g)>();
+    foreach (var (id, ent, meta) in WalkEntities(reader, ai))
+    {
+        var g = EntityGrid(reader, ent);
+        var d = (g == default) ? double.MaxValue : Math.Sqrt((g.X - pg.X) * (g.X - pg.X) + (g.Y - pg.Y) * (g.Y - pg.Y));
+        if (d > radiusGrid) continue;
+        near.Add((d, id, ent, meta, g));
+    }
+    near.Sort((a, b) => a.dist.CompareTo(b.dist));
+    Console.WriteLine($"=== {near.Count} entities within {radiusGrid} tiles (nearest first) ===");
+    foreach (var (dist, id, ent, meta, g) in near)
+    {
+        var icon = ResolveComponentAddr(reader, ent, "MinimapIcon");
+        var poi = icon != 0;
+        var done = poi && reader.TryReadStruct<int>(icon + Poe2.MinimapIcon.CompletedState, out var s) && s != 0;
+        var keyword = meta.Contains("rune", StringComparison.OrdinalIgnoreCase)
+                   || meta.Contains("forge", StringComparison.OrdinalIgnoreCase)
+                   || meta.Contains("combin", StringComparison.OrdinalIgnoreCase)
+                   || meta.Contains("xpedition", StringComparison.OrdinalIgnoreCase);
+        var flag = keyword ? " <<< RUNE/FORGE/EXPEDITION" : poi ? " <POI>" : "";
+        Console.WriteLine($"\nid={id,-6} dist={dist,5:F1}  grid=({g.X:F0},{g.Y:F0})  @0x{ent:X}");
+        Console.WriteLine($"   meta: {meta}{flag}");
+        var comps = WalkComponents(reader, ent);
+        Console.WriteLine($"   components ({comps.Count}): {string.Join(", ", comps.Select(c => c.name))}");
+        if (poi) Console.WriteLine($"   MinimapIcon @0x{icon:X}  completed={done}");
+
+        // Small-int candidate-count scan: only for the interesting objects (a POI or a keyword match),
+        // to keep noise down. Reports each component offset (+0x00..+0x100, 4-byte stride) holding a
+        // value in 1..12 — a plausible "number of recipes/slots/runes". Compare these across instances
+        // with different counts: the field that TRACKS the count is the one to read.
+        if (poi || keyword)
+            foreach (var (cname, caddr) in comps)
+            {
+                if (caddr == 0) continue;
+                var buf = new byte[0x180];
+                if (reader.TryReadBytes(caddr, buf) < buf.Length) continue;
+                var hits = new List<string>();
+                for (var o = 0; o + 4 <= buf.Length; o += 4)
+                {
+                    var v = BitConverter.ToInt32(buf, o);
+                    if (v is >= 1 and <= 12) hits.Add($"+0x{o:X2}={v}");
+                }
+                if (hits.Count > 0) Console.WriteLine($"     {cname,-20} small-ints: {string.Join("  ", hits)}");
+
+                // Vector-length scan: the rune COUNT is likely a vector length (reward items / sub-
+                // inventories), not a scalar. Scan +0x00..+0x180 for StdVector-shaped {First,Last,End}
+                // triples and report element counts in 1..64 for plausible strides.
+                var vhits = new List<string>();
+                for (var o = 0; o + 24 <= 0x180; o += 8)
+                {
+                    var first = (nint)BitConverter.ToInt64(buf, o);
+                    var last = (nint)BitConverter.ToInt64(buf, o + 8);
+                    var end = (nint)BitConverter.ToInt64(buf, o + 16);
+                    if ((ulong)first is < 0x10000 or > 0x7FFFFFFFFFFF) continue;
+                    var span = (long)last - first;
+                    if (span <= 0 || last > end || (long)end - last > 0x400) continue;
+                    foreach (var stride in new[] { 8, 0x10, 0x18, 0x28, 0x40 })
+                        if (span % stride == 0 && span / stride is >= 1 and <= 64)
+                        { vhits.Add($"+0x{o:X2}[s{stride:X}]={span / stride}"); break; }
+                }
+                if (vhits.Count > 0) Console.WriteLine($"     {cname,-20} vec-lens:   {string.Join("  ", vhits)}");
+            }
+    }
+
+    // ── 2) TILE paths near the player ────────────────────────────────────────────────────────────
+    var terrain = ai + Poe2.AreaInstance.TerrainMetadata;
+    reader.TryReadStruct<long>(terrain + Poe2.Terrain.TotalTiles, out var tilesX);
+    var tFirst = SafePtr(reader, terrain + Poe2.Terrain.TileDetailsPtr);
+    reader.TryReadStruct<nint>(terrain + Poe2.Terrain.TileDetailsPtr + 8, out var tLast);
+    var tCount = tFirst == 0 ? 0 : ((long)tLast - (long)tFirst) / Poe2.TileStructureSize;
+    Console.WriteLine($"\n\n=== distinct tile paths within {radiusGrid} tiles of player (min distance shown) ===");
+    if (tilesX > 0 && tCount is > 0 and <= 1_000_000)
+    {
+        var cell = Poe2.Terrain.TileGridCells;
+        var pathCache = new Dictionary<nint, string?>();
+        var nearest = new Dictionary<string, double>(StringComparer.Ordinal);
+        for (long i = 0; i < tCount; i++)
+        {
+            var tgt = SafePtr(reader, tFirst + (nint)(i * Poe2.TileStructureSize) + Poe2.TileStructure.TgtFilePtr);
+            if (tgt == 0) continue;
+            if (!pathCache.TryGetValue(tgt, out var path))
+                pathCache[tgt] = path = ReadStdWString(reader, tgt + Poe2.TgtFileStruct.TgtPath);
+            if (string.IsNullOrEmpty(path)) continue;
+            double gx = (i % tilesX) * cell, gy = (i / tilesX) * cell;
+            var d = Math.Sqrt((gx - pg.X) * (gx - pg.X) + (gy - pg.Y) * (gy - pg.Y));
+            if (d > radiusGrid) continue;
+            if (!nearest.TryGetValue(path, out var prev) || d < prev) nearest[path] = d;
+        }
+        foreach (var kv in nearest.OrderBy(k => k.Value))
+            Console.WriteLine($"  {kv.Value,6:F1}  {kv.Key}");
+        if (nearest.Count == 0) Console.WriteLine("  (none — increase --radius)");
+    }
+    return 0;
+}
+
+// Read an entity's grid position via its Render component (CurrentWorldPosition +0x138 / world-to-grid).
+static System.Numerics.Vector2 EntityGrid(MemoryReader reader, nint entity)
+{
+    var render = ResolveComponentAddr(reader, entity, "Render");
+    if (render != 0 && reader.TryReadStruct<POE2Radar.Core.Game.Vector3>(render + 0x138, out var w))
+        return new System.Numerics.Vector2((float)(w.X / Poe2.WorldToGridRatio), (float)(w.Y / Poe2.WorldToGridRatio));
+    return default;
+}
+
 // ── Runeforge / "Runeshape Combinations" reward panel probe ─────────────────────────────────────
 // Validates (against the LIVE patch, with the panel OPEN) the port of GameHelper's RuneforgeHelper:
 //   1) resolve the recipes panel by a UI-FLAGS-FINGERPRINT walk with backtracking from GameUi
@@ -3210,6 +4425,83 @@ static int RunLootMap(ProcessHandle process, MemoryReader reader)
             }
         }
     }
+    return 0;
+}
+
+// Poll a named loot tag rapidly (~20 Hz, ~4 s) to characterize WHY the overlay chip looks low-refresh.
+// Run it WHILE MOVING the character with the item on the ground + PoE2 focused. Each poll re-finds the
+// visible text element whose first line == <name> and records its UiElement address + RelativePos.
+// Distinguishes the three causes:
+//   (a) MANY distinct addresses  → the game recreates the label element (transient) → the overlay's cached
+//       address goes stale/frozen between scans → must re-resolve the element per RENDER frame (e.g. cache
+//       the loot-label container and enumerate its children each frame), not off a 200 ms world scan.
+//   (b) ONE stable address + relPos changing nearly every sample → the value updates fine; the chop is the
+//       overlay FpsCap vs a high-refresh monitor → raise FpsCap.
+//   (c) ONE stable address + relPos changing only every ~200 ms → the source value itself updates slowly
+//       (or our scan gates it) → interpolate the chip toward the latest target.
+static int RunLootWatch(ProcessHandle process, MemoryReader reader, string name)
+{
+    name = name.Trim();
+    Console.WriteLine($"Locating loot tag \"{name}\" (one BFS)...");
+    var (_, igs0, _, _) = ResolveChain(process, reader);
+    var uiRoot = igs0 == 0 ? 0 : SafePtr(reader, igs0 + Poe2.InGameState.UiRoot);
+    nint el = 0;
+    if (uiRoot != 0)
+    {
+        var q = new Queue<nint>(); q.Enqueue(uiRoot); var vis = new HashSet<nint>();
+        while (q.Count > 0 && vis.Count < 60000 && el == 0)
+        {
+            var e = q.Dequeue(); if (e == 0 || !vis.Add(e)) continue;
+            if (!(reader.TryReadStruct<uint>(e + Poe2.UiElement.Flags, out var fl) && (fl & (1u << Poe2.UiElement.FlagVisibleBit)) != 0)) continue;
+            var t = ReadStdWString(reader, e + Poe2.UiElement.Text);
+            if (t.Length >= 2) { var nl = t.IndexOf('\n'); if (string.Equals((nl >= 0 ? t[..nl] : t).Trim(), name, StringComparison.OrdinalIgnoreCase)) el = e; }
+            var f = SafePtr(reader, e + Poe2.UiElement.Children);
+            if (f != 0 && reader.TryReadStruct<nint>(e + Poe2.UiElement.ChildrenEnd, out var l))
+            { var n = ((long)l - (long)f) / 8; if (n is > 0 and <= 4096) for (long i = 0; i < n; i++) q.Enqueue(SafePtr(reader, f + (nint)(i * 8))); }
+        }
+    }
+    if (el == 0) { Console.WriteLine("not found — is the item on the ground + PoE2 focused?"); return 0; }
+    Console.WriteLine($"locked element 0x{el:X}. MOVE your character continuously for ~10s now (keep PoE2 focused)...");
+
+    // Fast-poll the LOCKED address (no BFS) to measure the TRUE update rate of its RelativePos. Records the
+    // interval between distinct values: that interval's inverse is the rate the game refreshes the label pos.
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    int polls = 0, textOk = 0, changes = 0;
+    (float x, float y) last = (float.NaN, float.NaN);
+    long lastChangeMs = -1; var intervals = new List<long>();
+    var firstSamples = new List<(long t, float x, float y)>();
+    while (sw.ElapsedMilliseconds < 10000)
+    {
+        polls++;
+        var t = ReadStdWString(reader, el + Poe2.UiElement.Text);
+        var nl = t.IndexOf('\n');
+        if (string.Equals((nl >= 0 ? t[..nl] : t).Trim(), name, StringComparison.OrdinalIgnoreCase)) textOk++;
+        reader.TryReadStruct<System.Numerics.Vector2>(el + Poe2.UiElement.RelativePos, out var rel);
+        if (!(Math.Abs(rel.X - last.x) < 0.01f && Math.Abs(rel.Y - last.y) < 0.01f))
+        {
+            var now = sw.ElapsedMilliseconds;
+            if (lastChangeMs >= 0) intervals.Add(now - lastChangeMs);
+            lastChangeMs = now; changes++; last = (rel.X, rel.Y);
+            if (firstSamples.Count < 30) firstSamples.Add((now, rel.X, rel.Y));
+        }
+        System.Threading.Thread.Sleep(2);
+    }
+    var pollHz = polls / 10.0;
+    Console.WriteLine($"\npolls={polls} (~{pollHz:0} Hz poll)  text-still-matches={textOk}/{polls}");
+    if (intervals.Count > 0)
+    {
+        intervals.Sort();
+        var avg = intervals.Average();
+        var med = intervals[intervals.Count / 2];
+        Console.WriteLine($"relPos distinct changes={changes}  interval ms: min={intervals[0]} median={med} avg={avg:0.0} max={intervals[^1]}");
+        Console.WriteLine($"=> source update rate ~ {(med > 0 ? 1000.0 / med : 0):0} Hz (median)");
+    }
+    else Console.WriteLine($"relPos NEVER changed over 4s (you weren't moving, or the value is static). Re-run while moving.");
+    Console.WriteLine("\nfirst distinct-value samples (t ms, relPos):");
+    foreach (var s in firstSamples) Console.WriteLine($"  t={s.t,4} ({s.x:0.0},{s.y:0.0})");
+    Console.WriteLine("\nINTERPRETATION (while moving):");
+    Console.WriteLine($"  update rate ~ monitor Hz   => source is smooth; the chop is overlay FpsCap (raise it to match).");
+    Console.WriteLine($"  update rate low (10-30 Hz) => the GAME refreshes the label pos slowly; interpolate the chip toward target.");
     return 0;
 }
 
@@ -5804,6 +7096,35 @@ static class Win
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int n);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc cb, nint lparam);
+    public delegate bool EnumWindowsProc(nint h, nint lparam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(nint h, out uint pid);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(nint h);
+
+    // The largest visible top-level window owned by `pid` (the game's main window, even when not focused).
+    public static nint FindMainWindowForPid(uint pid)
+    {
+        nint best = 0; long bestArea = 0;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            GetWindowThreadProcessId(h, out var wp);
+            if (wp != pid) return true;
+            if (GetClientRect(h, out var r))
+            {
+                long area = (long)r.right * r.bottom;
+                if (area > bestArea) { bestArea = area; best = h; }
+            }
+            return true;
+        }, 0);
+        return best;
+    }
 }
 
 readonly record struct VecLayout(int VecOff, int ElemSize, int SlotA, int SlotB);

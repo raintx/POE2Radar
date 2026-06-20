@@ -168,6 +168,32 @@ public static class Poe2
         public const int CompletedState = 0x10; // ✓ int — 0 = active/shown, non-zero = completed/faded
     }
 
+    /// <summary>StateMachine component — drives stateful devices. Its listener vector at
+    /// <see cref="ListenerVec"/> registers the device's RuneStation (see <see cref="RuneStation"/>).</summary>
+    public static class StateMachine
+    {
+        public const int ListenerVec = 0x20; // ✓ StdVector {first,last} of listener-node ptrs
+    }
+
+    /// <summary>RuneStation — the heap object behind a runeshape-monolith device (the persistent
+    /// <c>Metadata/MiscellaneousObjects/Expedition2/Expedition2Encounter</c> entity, the one carrying the
+    /// MinimapIcon POI). NOT an entity/component: it's reached from the device via
+    /// device→StateMachine→listener-vec → <c>station = *(node) − <see cref="ListenerSub"/></c>, verified by
+    /// <c>*(station + <see cref="Owner"/>) == device</c>. Exposes the monolith's hole count + anchor rune
+    /// WITHOUT opening the panel (and persists out of the network bubble → readable area-wide).
+    /// ✓ validated live 2026-06-20 (Research <c>--monolith</c>): N=3, anchor rune index 12 ("Cyclonic").</summary>
+    public static class RuneStation
+    {
+        public const int Owner       = 0x10; // ✓ → device entity (verification)
+        public const int AnchorRef   = 0x28; // ✓ → Expedition2Runes row ptr (0 = no anchor → "unique" monolith)
+        public const int AnchorHolder= 0x30; // ✓ → holder; (+0x28 → rune-table ptr; *ptr = per-area table base)
+        public const int HoleCount   = 0x38; // ✓ int N — the authoritative recipe hole count ("slots")
+        public const int AnchorPos   = 0x3c; // ✓ int — anchor hole index (0-based)
+        public const int ListenerSub = 0x98; // ✓ listener node ptr = station + 0x98
+        public const int RuneStride  = 0x6c; // ✓ Expedition2Runes row stride (anchorIdx = (rowPtr-base)/stride)
+        public const int RuneCount   = 34;   // ✓ Expedition2Runes rows 0..33
+    }
+
     /// <summary>ObjectMagicProperties component — monster/chest rarity.</summary>
     public static class ObjectMagicProperties
     {
@@ -203,6 +229,18 @@ public static class Poe2
     public static class RenderItemComponent
     {
         public const int ResourcePath = 0x28; // ⚠ → UTF-16 .dds art path
+    }
+
+    /// <summary>Base component (on the inner item entity) — the item's BASE TYPE, including the rendered
+    /// display name. ✓ validated live 2026-06-20 (Research --itemdump on a dropped Greater Orb of
+    /// Augmentation): <c>Base +0x10</c> → a row whose <c>+0x30</c> is a pointer to the UTF-16 display name
+    /// ("Greater Orb of Augmentation"); <c>Base +0x18</c> → the BaseItemTypes row (+0x00 internal id
+    /// "CurrencyAddModToMagic2", +0x08 .dds art, +0x10 .ao). The display name is the price-lookup key for
+    /// NON-uniques (currency/runes/essences/…), which the shared .dds art can't disambiguate across tiers.</summary>
+    public static class BaseComponent
+    {
+        public const int NameRow        = 0x10; // → row carrying the rendered display name
+        public const int RowDisplayName = 0x30; // row + this → UTF-16 display base-type name
     }
 
     /// <summary>Mods component (on items) — rarity lives at a DIFFERENT offset than ObjectMagicProperties.
@@ -468,6 +506,16 @@ public static class Poe2
         public const int ViewportStep = 2;   // this hop's element holds the scroll offset (+0x120)
         public const int ScrollOffset = 0x120; // StdTuple2D<float> viewport scroll offset
         public const int NameWString = 0x390;  // visible row's kid[0]: inline std::wstring "<count>x <name>"
+    }
+
+    /// <summary>Ritual tribute-shop reward grid. The reward TILES are item-slot UiElements (same "ItemFrame"
+    /// element type as the flask bar): each holds its reward item Entity at <see cref="TileSlotItem"/>. The
+    /// grid is found by walking up from a shop-signature text element to the ancestor whose child is a
+    /// container of these tiles (see <c>Poe2Live.ReadRitualRewards</c>). Validated live 2026-06-20 (Research
+    /// <c>--tooltip-capture</c>): all 5 offered rewards read as full item entities with no hover needed.</summary>
+    public static class Ritual
+    {
+        public const int TileSlotItem = 0x4F8; // ✓ item-slot UiElement → reward item Entity (also the flask-bar slot field)
     }
 
     /// <summary>Atlas map-node UiElement (a subclass with its own vtable; ~1200+ instances live in the

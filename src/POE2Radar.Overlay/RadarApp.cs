@@ -63,11 +63,17 @@ public sealed class RadarApp : IDisposable
     // The render-consumed outputs (open flag + marks + route) are published as ONE immutable record the
     // world thread swaps atomically and the render thread reads lock-free — same lock-free-snapshot idiom
     // as _world / _state below.
-    private sealed record AtlasRender(bool Open, IReadOnlyList<AtlasMark> Marks, NumVec2? Start, NumVec2? End, IReadOnlyList<NumVec2>? Route)
+    // A route/marker point: the node's UiElement (so the render thread re-reads live RelativePos per frame →
+    // smooth pan) PLUS the world-walk's baked position as a fallback when that read is rejected (stale/freed
+    // element scrolled off-screen, or garbage) — without the fallback those bad reads streaked lines.
+    private readonly record struct AtlasPoint(nint El, float Bx, float By);
+    private sealed record AtlasAutoSpec(IReadOnlyList<AtlasPoint> Points, string? Color, int Hops);
+    private sealed record AtlasRender(bool Open, IReadOnlyList<AtlasMark> Marks, AtlasPoint? Start, AtlasPoint? End, IReadOnlyList<AtlasPoint>? Route, AtlasPoint? Current, IReadOnlyList<AtlasAutoSpec> AutoRoutes)
     {
-        public static readonly AtlasRender Closed = new(false, Array.Empty<AtlasMark>(), null, null, null);
+        public static readonly AtlasRender Closed = new(false, Array.Empty<AtlasMark>(), null, null, null, null, Array.Empty<AtlasAutoSpec>());
     }
     private volatile AtlasRender _atlasRender = AtlasRender.Closed;
+    private readonly List<AtlasMark> _atlasMarkFrame = new();   // render-thread scratch: marks with per-frame-fresh relPos
 
     // ── Runeforge ("Runeshape Combinations") priced-reward labels: same lock-free published-record idiom.
     //    Built on the world thread (panel read + price lookup), read by the render thread. ──
@@ -76,6 +82,37 @@ public sealed class RadarApp : IDisposable
         public static readonly RuneRender Closed = new(false, Array.Empty<RuneLabel>());
     }
     private volatile RuneRender _runeRender = RuneRender.Closed;
+
+    // ── Ritual tribute-shop priced-reward labels: same lock-free published-record idiom. Built on the world
+    //    thread (read the 5 reward tiles' item entities + price each), drawn by the render thread on each tile.
+    private sealed record RitualRender(bool Open, IReadOnlyList<RitualLabel> Labels)
+    {
+        public static readonly RitualRender Closed = new(false, Array.Empty<RitualLabel>());
+    }
+    private volatile RitualRender _ritualRender = RitualRender.Closed;
+
+    // ── Loot-tag value chips: the WORLD thread scans the visible UI tree for tag text, matches each to a
+    //    priced item by name, and publishes a spec per match (the tag's UiElement address + value). The
+    //    RENDER thread re-reads each element's LIVE screen rect (game-computed → smooth) and draws on it.
+    //    Same lock-free published-record idiom as the runeforge/HP-bar pipelines. ──
+    private readonly record struct LootTagSpec(nint El, string TagText, string Value, bool Highlight);
+    private sealed record LootTagRender(IReadOnlyList<LootTagSpec> Specs)
+    {
+        public static readonly LootTagRender Empty = new(Array.Empty<LootTagSpec>());
+    }
+    private volatile LootTagRender _lootTags = LootTagRender.Empty;
+    private DateTime _nextLootScanUtc = DateTime.MinValue;        // world-thread scan throttle
+    private const int LootScanThrottleMs = 200;                  // re-scan the UI tree ~5×/s (cheap, pruned)
+    private readonly List<LootTagLabel> _lootTagFrame = new();   // render-thread scratch (rebuilt per frame)
+
+    // ── Runeshape monoliths (priced offered rewards, read off the in-world device — works area-wide,
+    //    before the panel is opened). World-space markers; published per area-hash for the zone-load guard. ──
+    private readonly RuneMonolithCatalog _monoCatalog = RuneMonolithCatalog.Instance;
+    private sealed record MonolithRender(uint AreaHash, IReadOnlyList<MonolithMarker> Markers)
+    {
+        public static readonly MonolithRender Empty = new(0, Array.Empty<MonolithMarker>());
+    }
+    private volatile MonolithRender _monoRender = MonolithRender.Empty;
 
     private readonly object _atlasLock = new();
     private readonly HashSet<nint> _atlasSel = new();   // selected node element addresses (from the dashboard)
@@ -141,6 +178,10 @@ public sealed class RadarApp : IDisposable
     private volatile WorldSnapshot _world = WorldSnapshot.Empty;
     private NumVec2 _worldPlayer;          // the world tick's current player grid (for off-thread replans)
     private volatile float _worldMs, _renderMs;  // last world-pass / render-frame durations (ms) — /state timers
+    private volatile float _fps;                  // measured render FPS (effective, over a rolling window) — /state
+    private int _autoHz = 144;                     // detected refresh of the monitor the game is on (FpsCap=0 → auto; 144 = pre-detection fallback)
+    private bool _autoHzLogged;                     // log the first successful detection (proves it read the monitor, not the fallback)
+    private DateTime _nextHzCheckUtc = DateTime.MinValue;
 
     private uint _areaHash;        // render thread: live area hash (RadarState + zone-load draw gate)
     private nint _gameHwnd;
@@ -294,6 +335,167 @@ public sealed class RadarApp : IDisposable
             _settings.AutoNavPatterns = new(); _settings.Save();
             Console.WriteLine("Migrated auto-path patterns onto display rules' Auto-path flag.");
         }
+        // One-time: seed a default rule that flags Abyss "Lightless" (Amanamu void) monsters — the
+        // dangerous void-cloud mobs. Same idea as the community AmanamuVoidAlert plugin's PRIMARY detector:
+        // match the monster's affix-mod ids (we read ObjectMagicProperties+Mods). Placed before the generic
+        // "Monster · <rarity>" rules so it wins. Guarded by a seed flag so deleting it from the dashboard
+        // sticks. NOTE: this matches on the affix-mod ids we read (+0x168); if the abyss faction mod proves
+        // to live in the ModNames vector (+0x150) we don't currently read, this won't fire and we extend the
+        // read — verify live via the dashboard Entities view on an Abyss monster.
+        if (!_settings.AbyssRuleSeeded)
+        {
+            const string abyssRuleName = "Abyss Lightless (Void)";
+            var rules = _displayRules.All.ToList();
+            if (!rules.Any(r => string.Equals(r.Name, abyssRuleName, StringComparison.Ordinal)))
+            {
+                var idx = rules.FindIndex(r => r.Name.StartsWith("Monster ·", StringComparison.Ordinal));
+                var abyssRule = new DisplayRule
+                {
+                    Name = abyssRuleName,
+                    Categories = new() { "Monster" },
+                    Mods = new() { "AbyssLightless", "LightlessWell", "Lightless" }, // affix-mod id terms (ANY-of)
+                    Shape = "Exclamation", Color = "#B450FF", Opacity = 1f, Size = 6f, Label = "VOID",
+                };
+                if (idx >= 0) rules.Insert(idx, abyssRule); else rules.Add(abyssRule);
+                _displayRules.Replace(rules);
+                Console.WriteLine("Display rules: seeded default Abyss Lightless (Void) monster rule.");
+            }
+            _settings.AbyssRuleSeeded = true; _settings.Save();
+        }
+        // One-time (v2): apply the curated icon glyphs to the STOCK display rules. Names are matched
+        // SEPARATOR-INSENSITIVELY (normalized to lowercase alphanumerics) because the stock names contain a
+        // "·" whose code point didn't match a literal key in the v1 pass — silently skipping Monster·Unique
+        // and the chests. Each entry only retouches a rule still on its OLD default shape, so user
+        // customizations are preserved; idempotent (already-applied rules no longer match their old shape).
+        if (!_settings.IconDefaultsApplied2)
+        {
+            static string Norm(string s)
+            {
+                var sb = new System.Text.StringBuilder(s.Length);
+                foreach (var ch in s) if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+                return sb.ToString();
+            }
+            var iconMap = new Dictionary<string, (string from, string to)>(StringComparer.Ordinal)
+            {
+                ["monsterunique"]      = ("Star", "Skull"),
+                ["monstermagic"]       = ("Diamond", "Fang"),
+                ["monsterrare"]        = ("Triangle", "Claw"),
+                ["player"]             = ("Circle", "Person"),
+                ["npc"]                = ("Plus", "Chat"),
+                ["chestrare"]          = ("Square", "Chest"),
+                ["chestunique"]        = ("Square", "Crown"),
+                ["transition"]         = ("Diamond", "Stairs"),
+                ["pointofinterest"]    = ("Circle", "MapPin"),
+                ["breach"]             = ("Diamond", "Portal"),
+                ["essence"]            = ("Triangle", "Flask"),
+                ["expedition"]         = ("Plus", "Flag"),
+                ["strongbox"]          = ("Square", "Chest"),
+                ["abysslightlessvoid"] = ("Diamond", "Exclamation"),
+            };
+            var rules = _displayRules.All.ToList();
+            var changed = 0;
+            foreach (var r in rules)
+                if (iconMap.TryGetValue(Norm(r.Name), out var m) && string.Equals(r.Shape, m.from, StringComparison.OrdinalIgnoreCase))
+                { r.Shape = m.to; changed++; }
+            if (changed > 0) _displayRules.Replace(rules);
+            _settings.IconDefaultsApplied = true; _settings.IconDefaultsApplied2 = true; _settings.Save();
+            Console.WriteLine($"Display rules: applied curated icon glyphs to {changed} stock rule(s).");
+        }
+        // One-time cleanup: the legacy "watched" defaults were seeded as Diamond, (any)-category rules placed
+        // BEFORE the mechanic rules, so they shadowed them (everything drew as a diamond) — and the bare
+        // "Ritual"/"Breach"/"Essence" mechanic matches with no category gate tagged the leagues' MONSTERS.
+        if (!_settings.RuleCleanupV1)
+        {
+            static bool AnyCat(DisplayRule r) => r.Categories is null or { Count: 0 };
+            var rules = _displayRules.All.ToList();
+            var before = rules.Count;
+            // a) Drop the stale Diamond duplicates that shadow a mechanic rule (matched by their target path).
+            var dupMatches = new[] { "LeagueRitual", "Expedition2/Expedition2Encounter", "StrongBoxes", "Metadata/Shrines/" };
+            rules.RemoveAll(r => string.Equals(r.Shape, "Diamond", StringComparison.OrdinalIgnoreCase)
+                && AnyCat(r) && r.Match is { Count: > 0 } && r.Match.Any(m => dupMatches.Contains(m)));
+            // b) Gate the broad mechanic rules to the marker (Object/Other) so they never tag monsters.
+            foreach (var r in rules)
+                if (AnyCat(r) && (string.Equals(r.Name, "Ritual", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(r.Name, "Breach", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(r.Name, "Essence", StringComparison.OrdinalIgnoreCase)))
+                    r.Categories = new List<string> { "Object", "Other" };
+            // c) Reskin the remaining navigation-POI diamonds to sensible glyphs (only if still Diamond).
+            var poiIcons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Waypoint"] = "MapPin", ["Checkpoint"] = "Flag", ["Entrance"] = "Stairs", ["Stash"] = "Chest",
+                ["Portal"] = "Portal", ["Town Portal"] = "Portal", ["Quest Chest"] = "Chest", ["Quest Object"] = "Exclamation",
+                ["Quest Marker"] = "Exclamation", ["Reforging Bench"] = "Coin", ["Crafting Bench"] = "Coin", ["Abyss Crack"] = "Exclamation",
+            };
+            foreach (var r in rules)
+                if (string.Equals(r.Shape, "Diamond", StringComparison.OrdinalIgnoreCase) && poiIcons.TryGetValue(r.Name, out var ic))
+                    r.Shape = ic;
+            _displayRules.Replace(rules);
+            _settings.RuleCleanupV1 = true; _settings.Save();
+            Console.WriteLine($"Display rules: cleanup removed {before - rules.Count} stale duplicate(s), gated mechanic rules, reskinned POIs.");
+        }
+        // One-time: give the non-monster mechanic/special rules a default in-game LABEL where they had none,
+        // so their marker shows text (Expedition/Ritual/Breach already had labels from the legacy watched set;
+        // Strongbox/Essence/Shrine/Transition/chests did not). Only fills an empty label (never overwrites).
+        if (!_settings.MechanicLabelsV1)
+        {
+            static string Norm(string s)
+            {
+                var sb = new System.Text.StringBuilder(s.Length);
+                foreach (var ch in s) if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+                return sb.ToString();
+            }
+            var labelMap = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["strongbox"] = "Strongbox", ["essence"] = "Essence", ["shrine"] = "Shrine",
+                ["transition"] = "Transition", ["chestunique"] = "Unique Chest", ["chestrare"] = "Rare Chest",
+            };
+            var rules = _displayRules.All.ToList();
+            var n = 0;
+            foreach (var r in rules)
+                if (string.IsNullOrEmpty(r.Label) && labelMap.TryGetValue(Norm(r.Name), out var lbl)) { r.Label = lbl; n++; }
+            if (n > 0) _displayRules.Replace(rules);
+            _settings.MechanicLabelsV1 = true; _settings.Save();
+            Console.WriteLine($"Display rules: added default labels to {n} non-monster rule(s).");
+        }
+        // One-time: broaden the ground-item categories from the old 4 to the full high-value set (now that
+        // non-uniques actually price + draw). Only replaces the EXACT old default, so a custom set is kept.
+        if (!_settings.GroundDefaultsV2)
+        {
+            var cur = _settings.GroundItems.Categories ?? new();
+            var old = new HashSet<string>(new[] { "Uniques", "Runes", "Essences", "Currency" }, StringComparer.OrdinalIgnoreCase);
+            if (cur.Count == old.Count && cur.All(old.Contains))
+            {
+                _settings.GroundItems.Categories = new GroundItemSettings().Categories; // the new broad default
+                Console.WriteLine("Ground items: broadened category set to the full high-value default.");
+            }
+            _settings.GroundDefaultsV2 = true; _settings.Save();
+        }
+        // One-time: bump monster Magic/Rare/Unique rule sizes — the Fang/Claw/Skull glyphs are far less
+        // legible than the old flat shapes at the same radar size. Only retouches a rule still on its OLD
+        // default size (within a small epsilon), so a size you've customized is preserved.
+        if (!_settings.IconSizesV1)
+        {
+            static string Norm(string s)
+            {
+                var sb = new System.Text.StringBuilder(s.Length);
+                foreach (var ch in s) if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+                return sb.ToString();
+            }
+            var sizeMap = new Dictionary<string, (float from, float to)>(StringComparer.Ordinal)
+            {
+                ["monstermagic"]  = (3.4f, 5.5f),
+                ["monsterrare"]   = (5.5f, 7.5f),
+                ["monsterunique"] = (6.5f, 8.0f),
+            };
+            var rules = _displayRules.All.ToList();
+            var n = 0;
+            foreach (var r in rules)
+                if (sizeMap.TryGetValue(Norm(r.Name), out var m) && Math.Abs(r.Size - m.from) < 0.05f)
+                { r.Size = m.to; n++; }
+            if (n > 0) _displayRules.Replace(rules);
+            _settings.IconSizesV1 = true; _settings.Save();
+            Console.WriteLine($"Display rules: bumped {n} monster icon size(s) for glyph legibility.");
+        }
         _displayRulesGen = _displayRules.Generation;
         // User-editable overlay on the baked curated landmark table (the "Landmarks" tab). Inject its
         // lookup so the landmark scan honors user edits on top of the shipped community data.
@@ -358,16 +560,61 @@ public sealed class RadarApp : IDisposable
         // fast per-frame reads + draw, so a slow world pass (big pack, zone load) never hitches frames.
         _worldThread = new Thread(WorldLoop) { IsBackground = true, Name = "POE2Radar.World" };
         _worldThread.Start();
-        while (!_shutdown)
+        timeBeginPeriod(1);   // 1 ms timer resolution → the frame pacer below can actually hit FpsCap
+        try
         {
-            if (_gameHwnd == 0) _gameHwnd = OverlayNative.FindWindowForProcess(_process.ProcessId);
-            if (_gameHwnd != 0) _window.TrackGameWindow(_gameHwnd);
-            if (!_window.PumpMessages()) break;
-            Tick();
-            // Configurable frame budget (read live so dashboard edits apply immediately).
-            var hz = Math.Clamp(_settings.FpsCap, 15, 360);
-            Thread.Sleep(Math.Max(1, 1000 / hz));
+            var frameSw = System.Diagnostics.Stopwatch.StartNew();
+            var fpsSw = System.Diagnostics.Stopwatch.StartNew();
+            var fpsFrames = 0;
+            while (!_shutdown)
+            {
+                frameSw.Restart();
+                if (_gameHwnd == 0) _gameHwnd = OverlayNative.FindWindowForProcess(_process.ProcessId);
+                if (_gameHwnd != 0) _window.TrackGameWindow(_gameHwnd);
+                if (!_window.PumpMessages()) break;
+                Tick();
+
+                // Effective render FPS over a rolling ~500 ms window (actual loop iterations/sec, after
+                // pacing) — exposed via /state so we can verify we're truly hitting FpsCap, not just asking.
+                if (++fpsFrames >= 1 && fpsSw.ElapsedMilliseconds >= 500)
+                {
+                    _fps = (float)(fpsFrames * 1000.0 / fpsSw.Elapsed.TotalMilliseconds);
+                    fpsFrames = 0; fpsSw.Restart();
+                }
+                // Pace to the configured cap against ELAPSED time (incl. the Tick render cost), not a fixed
+                // sleep on top of it — otherwise effective fps = 1000/(budget+renderMs), always below the cap.
+                // FpsCap <= 0 means "auto-match the monitor the game is on" (re-detected ~1/s; logged on change).
+                // Read live so dashboard edits apply immediately.
+                int hz;
+                if (_settings.FpsCap > 0) hz = Math.Clamp(_settings.FpsCap, 15, 360);
+                else
+                {
+                    var nowHz = DateTime.UtcNow;
+                    if (nowHz >= _nextHzCheckUtc)
+                    {
+                        _nextHzCheckUtc = nowHz.AddSeconds(1);
+                        var det = DetectGameMonitorHz(_gameHwnd);
+                        if (det > 0)
+                        {
+                            var clamped = Math.Clamp(det, 30, 360);
+                            if (clamped != _autoHz || !_autoHzLogged)
+                            {
+                                _autoHz = clamped; _autoHzLogged = true;
+                                Console.WriteLine($"Auto FPS cap: {_autoHz} Hz (game monitor refresh).");
+                            }
+                        }
+                    }
+                    hz = _autoHz;
+                }
+                var budgetMs = 1000.0 / hz;
+                var remaining = budgetMs - frameSw.Elapsed.TotalMilliseconds;
+                // Coarse-sleep most of the remainder (1 ms accurate now), then spin the last ~1.5 ms for a
+                // tight, low-jitter frame interval — what high-refresh tracking needs.
+                if (remaining > 2.0) Thread.Sleep((int)(remaining - 1.5));
+                while (frameSw.Elapsed.TotalMilliseconds < budgetMs) Thread.SpinWait(64);
+            }
         }
+        finally { timeEndPeriod(1); }
     }
 
     /// <summary>The background world loop (~<see cref="WorldHz"/> Hz, adaptive): resolve the chain on its
@@ -405,6 +652,7 @@ public sealed class RadarApp : IDisposable
             _builtAtlasOnce = false; _lastAtlasSig = 0;
         }
         if (!ReferenceEquals(_runeRender, RuneRender.Closed)) _runeRender = RuneRender.Closed;
+        if (!ReferenceEquals(_lootTags, LootTagRender.Empty)) _lootTags = LootTagRender.Empty;
     }
 
     /// <summary>Read the open "Runeshape Combinations" panel (cheap when closed) and publish a priced label
@@ -440,6 +688,151 @@ public sealed class RadarApp : IDisposable
         _runeRender = new RuneRender(labels.Count > 0, labels);
     }
 
+    /// <summary>Read the open ritual tribute shop (cheap when closed — gated on a shop-signature text element)
+    /// and publish a priced value label per offered reward for the renderer to draw on each tile. Uniques
+    /// price by 2D-art basename, everything else by base-type name (same rule as ground items). Shares the
+    /// ground-item pricing toggle + league + value floor. World thread.</summary>
+    private void UpdateRitualRewards(nint inGameState)
+    {
+        var cfg = _settings.GroundItems;   // shares the ground-item pricing toggle + league + thresholds
+        if (!cfg.Enabled || !_priceBook.IsLoaded)
+        {
+            if (!ReferenceEquals(_ritualRender, RitualRender.Closed)) _ritualRender = RitualRender.Closed;
+            return;
+        }
+        var rewards = _live.ReadRitualRewards(inGameState, _window.Width, _window.Height);
+        if (rewards.Count == 0)
+        {
+            if (!ReferenceEquals(_ritualRender, RitualRender.Closed)) _ritualRender = RitualRender.Closed;
+            return;
+        }
+        var labels = new List<RitualLabel>(rewards.Count);
+        foreach (var r in rewards)
+        {
+            // Uniques key off art (each has its own icon; an unID unique's name is hidden); everything else
+            // keys off the base-type name (currency/omen tiers share one art). Same logic as BuildItemLabels.
+            var pr = r.Rarity == Poe2Live.Rarity.Unique
+                ? _priceBook.TryByArt(r.Art)
+                : (r.Name is { Length: > 0 } nm ? _priceBook.TryByName(nm) : null);
+            if (pr is not { } p) continue;                       // unknown reward → no label
+            var text = _priceBook.Format(p.Exalted);
+            // Value tier (absolute Exalted): ≥5 ex green, <0.5 ex dim red, else amber (same palette as runeforge).
+            var color = p.Exalted >= 5.0 ? 0xFF66E066u : p.Exalted < 0.5 ? 0xFFE06666u : 0xFFE6C84Du;
+            labels.Add(new RitualLabel(r.X, r.Y, r.W, r.H, text, color, p.Exalted >= cfg.HighlightMinEx));
+        }
+        _ritualRender = new RitualRender(labels.Count > 0, labels);
+    }
+
+    /// <summary>Scan the visible UI tree for loot-tag text (world thread, THROTTLED + invisible-subtree
+    /// pruned, so it's cheap) and match each tag's first line to a priced item by NAME — the tag's text IS
+    /// the item name, so no item-entity link is needed. Publishes a spec per match (the tag's UiElement
+    /// address + formatted value + highlight); the render thread reads each element's LIVE screen rect
+    /// (<see cref="Poe2Live.TryUiElementRect"/> → game-computed, smooth, perfectly aligned) and draws a value
+    /// chip on it. Covers everything the game already names — currency, runes, essences, fragments, IDENTIFIED
+    /// uniques — leaving only UNIDENTIFIED uniques (name hidden by the game) to the world-projected reveal in
+    /// <see cref="BuildItemLabels"/>. Cheap no-op when disabled or between throttle windows.</summary>
+    private void UpdateLootTags(nint inGameState)
+    {
+        var cfg = _settings.GroundItems;
+        var enabled = cfg.Categories is { Count: > 0 }
+            ? new HashSet<string>(cfg.Categories, StringComparer.OrdinalIgnoreCase) : null;
+        if (!cfg.Enabled || !cfg.AnchorValuesToTags || !_priceBook.IsLoaded || enabled is null)
+        {
+            if (!ReferenceEquals(_lootTags, LootTagRender.Empty)) _lootTags = LootTagRender.Empty;
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (now < _nextLootScanUtc) return;   // between scans: keep the last published specs (render re-reads rects live)
+        _nextLootScanUtc = now.AddMilliseconds(LootScanThrottleMs);
+
+        var tags = _live.ScanLootLabels(inGameState);
+        if (tags.Count == 0)
+        {
+            if (!ReferenceEquals(_lootTags, LootTagRender.Empty)) _lootTags = LootTagRender.Empty;
+            return;
+        }
+
+        var specs = new List<LootTagSpec>();
+        var seen = new HashSet<nint>();
+        foreach (var (el, text) in tags)
+        {
+            if (!seen.Add(el)) continue;
+            // The tag's text is the item name; stacks may read "5x Chaos Orb" — try the raw line, then the
+            // count-stripped name. Uniques are indexed by name too, so identified-unique tags resolve here.
+            var pr = _priceBook.TryByName(text) ?? _priceBook.TryByName(StripCount(text));
+            if (pr is not { } p) continue;
+            if (cfg.MinQuantity > 0 && p.Quantity < cfg.MinQuantity) continue;
+            var group = CategoryGroup(p.Category);
+            if (!enabled.Contains(group)) continue;          // category group toggled off
+            if (p.Exalted < GroundFloor(group)) continue;    // below this bucket's value floor
+            specs.Add(new LootTagSpec(el, text, _priceBook.Format(p.Exalted), p.Exalted >= cfg.HighlightMinEx));
+        }
+        _lootTags = specs.Count > 0 ? new LootTagRender(specs) : LootTagRender.Empty;
+    }
+
+    /// <summary>Strip a leading "&lt;count&gt;x " from a stack tag ("5x Chaos Orb" → "Chaos Orb") so the name
+    /// matches the PriceBook key; returns the input trimmed when there's no count prefix.</summary>
+    private static string StripCount(string raw)
+    {
+        var name = raw?.Trim() ?? "";
+        var i = 0;
+        while (i < name.Length && char.IsDigit(name[i])) i++;
+        return i > 0 && i < name.Length && (name[i] == 'x' || name[i] == 'X')
+            ? name[(i + 1)..].TrimStart() : name;
+    }
+
+    /// <summary>Resolve every runeshape-monolith device in the area (the persistent Expedition2Encounter
+    /// POI entities, already in <see cref="_entities"/>), read its hole count + anchor rune off the device→
+    /// station chain, compute the rewards it will offer (<see cref="RuneMonolithCatalog"/>, level-gated),
+    /// price each via the PriceBook, and publish a value-coloured <see cref="MonolithRender"/> bundle. Works
+    /// area-wide and BEFORE the panel is opened (the station persists out of the network bubble).</summary>
+    private void UpdateMonoliths(nint areaInstance, int areaLevel, uint areaHash)
+    {
+        var cfg = _settings.Monoliths;
+        if (!cfg.Enabled || !_priceBook.IsLoaded || !_monoCatalog.IsLoaded)
+        {
+            if (_monoRender.Markers.Count > 0) _monoRender = MonolithRender.Empty;
+            return;
+        }
+
+        var markers = new List<MonolithMarker>();
+        foreach (var e in _entities)
+        {
+            if (e.Metadata.IndexOf("Expedition2Encounter", StringComparison.OrdinalIgnoreCase) < 0) continue;
+            var m = _live.ReadMonolith(e.Address);
+            if (!m.Resolved) continue;
+            if (cfg.HideCollected && m.Collected) continue;
+
+            var offers = _monoCatalog.Offers(m.AnchorIdx, m.AnchorPos, m.HoleCount, m.IsUnique, areaLevel);
+            var rewards = new List<MonolithReward>(offers.Count);
+            double best = 0; var bestName = "";
+            foreach (var o in offers)
+            {
+                var ex = o.Name.Length > 0 && _priceBook.TryByName(o.Name) is { } pr ? pr.Exalted * Math.Max(1, o.Count) : 0;
+                rewards.Add(new MonolithReward(o.Name.Length > 0 ? o.Name : o.Description, o.Count, ex, o.Size, o.Runes));
+                if (ex > best) { best = ex; bestName = o.Name; }
+            }
+            rewards.Sort((a, b) => b.Ex.CompareTo(a.Ex));
+
+            var anchor = m.IsUnique ? "Unique" : m.AnchorIdx >= 0 ? _monoCatalog.RuneName(m.AnchorIdx) : "?";
+            markers.Add(new MonolithMarker(
+                e.Grid, m.HoleCount, m.IsUnique, m.Collected, anchor, best, bestName,
+                MonolithColor(best, cfg.HighlightMinEx), rewards));
+        }
+        _monoRender = new MonolithRender(areaHash, markers);
+    }
+
+    /// <summary>Value tier for a monolith's best reward (packed 0xAARRGGBB): green at/above the threshold,
+    /// yellow from 0.6×, neutral white below (or when nothing priced). Mirrors the ground-item tiers.</summary>
+    private static uint MonolithColor(double bestEx, double threshold)
+    {
+        if (bestEx <= 0 || threshold <= 0) return 0xFFFFFFFFu;
+        if (bestEx >= threshold) return 0xFF66E066u;          // green
+        if (bestEx >= 0.6 * threshold) return 0xFFE6C84Du;    // amber
+        return 0xFFFFFFFFu;                                   // neutral
+    }
+
     /// <summary>One RENDER frame (render thread): fast per-frame reads on the render reader stack
     /// (player/vitals/camera/map + auto-flask + HP-bar live pos), then draw from the lock-free world
     /// snapshot. The heavy walk is on <see cref="WorldLoop"/>.</summary>
@@ -452,12 +845,19 @@ public sealed class RadarApp : IDisposable
         var player = NumVec2.Zero;
         POE2Radar.Core.Game.Vector3? playerWorld = null;   // live player feet (incl. Z) for the world-ground route anchor
         var map = default(Poe2Live.MapUi);
+        // Atlas routes/markers re-read per frame (positions from node elements) so they track pan at full FPS.
+        NumVec2? atlasStart = null, atlasEnd = null, atlasCurrent = null;
+        List<NumVec2>? atlasRoute = null;
+        List<AtlasRouteInfo>? atlasAutoRoutes = null;
 
         // One lock-free read each of the two published snapshots — everything drawn this frame comes from
         // these two + the live render-rate reads below.
         var snap = _world;
         var ar = _atlasRender;
         var rr = _runeRender;
+        var rit = _ritualRender;
+        var mr = _monoRender;
+        var lt = _lootTags;
 
         if (inGame)
         {
@@ -493,8 +893,52 @@ public sealed class RadarApp : IDisposable
                 if (!_liveRender.TryLiveBarAt(s.Render, 0, out var w, out _, out _)) continue;
                 _itemFrame.Add(new ItemLabel(w, s.Name, s.Value, s.Highlight, s.ShowName));
             }
+
+            // Loot-tag chips: re-read each matched tag's LIVE screen rect this frame on the render reader.
+            // TryUiElementRect returns false for a tag that's gone invisible (panel/map open) or whose
+            // element is stale after a zone change → it simply drops out. No projection → no jitter.
+            _lootTagFrame.Clear();
+            foreach (var s in lt.Specs)
+            {
+                if (!_liveRender.TryUiElementRect(s.El, _window.Width, _window.Height, out var rx, out var ry, out var rw, out var rh, requireFirstLine: s.TagText)) continue;
+                _lootTagFrame.Add(new LootTagLabel(rx, ry, rw, rh, s.Value, s.Highlight));
+            }
+
+            // Atlas marks/routes: re-read each node's live RelativePos this frame so the rings + route lines
+            // track the atlas pan at full FPS (the world walk only refreshes baked positions ~30 Hz). Cheap —
+            // only the handful of DRAWN marks + route points, one atomic 8-byte read each; a stale/closed node
+            // falls back to its baked position (marks) or drops out (routes).
+            _atlasMarkFrame.Clear();
+            if (ar.Open)
+            {
+                foreach (var m in ar.Marks)
+                    _atlasMarkFrame.Add(m.Element != 0 && _liveRender.TryRelPos(m.Element, out var mx, out var my) ? m with { X = mx, Y = my } : m);
+
+                // Fresh live pos when the read validates, else the world-walk's baked pos — never a garbage
+                // coordinate (which would streak route lines off-screen). Points stay contiguous (no dropping).
+                NumVec2 Pt(AtlasPoint p) => p.El != 0 && _liveRender.TryRelPos(p.El, out var rx, out var ry) ? new NumVec2(rx, ry) : new NumVec2(p.Bx, p.By);
+                atlasStart = ar.Start is { } sp ? Pt(sp) : (NumVec2?)null;
+                atlasEnd = ar.End is { } ep ? Pt(ep) : (NumVec2?)null;
+                atlasCurrent = ar.Current is { } cp ? Pt(cp) : (NumVec2?)null;
+                if (ar.Route is { Count: >= 2 })
+                {
+                    var rl = new List<NumVec2>(ar.Route.Count);
+                    foreach (var p in ar.Route) rl.Add(Pt(p));
+                    atlasRoute = rl;
+                }
+                if (ar.AutoRoutes is { Count: > 0 })
+                {
+                    atlasAutoRoutes = new List<AtlasRouteInfo>(ar.AutoRoutes.Count);
+                    foreach (var spec in ar.AutoRoutes)
+                    {
+                        var pl = new List<NumVec2>(spec.Points.Count);
+                        foreach (var p in spec.Points) pl.Add(Pt(p));
+                        if (pl.Count >= 2) atlasAutoRoutes.Add(new AtlasRouteInfo(pl, spec.Color, spec.Hops));
+                    }
+                }
+            }
         }
-        else { if (_hpFrame.Count > 0) _hpFrame.Clear(); if (_itemFrame.Count > 0) _itemFrame.Clear(); }
+        else { if (_hpFrame.Count > 0) _hpFrame.Clear(); if (_itemFrame.Count > 0) _itemFrame.Clear(); if (_lootTagFrame.Count > 0) _lootTagFrame.Clear(); if (_atlasMarkFrame.Count > 0) _atlasMarkFrame.Clear(); }
 
         // Zone-load guard: the world snapshot lags the live chain by up to one world pass, so right after a
         // zone change its entities/terrain/route still belong to the PREVIOUS area. Only draw them once the
@@ -508,10 +952,14 @@ public sealed class RadarApp : IDisposable
         var legend = worldFresh ? snap.Legend : (IReadOnlyList<LegendEntry>)Array.Empty<LegendEntry>();
         var hpTargets = worldFresh ? (IReadOnlyList<HpBarTarget>)_hpFrame : Array.Empty<HpBarTarget>();
         var itemLabels = worldFresh ? (IReadOnlyList<ItemLabel>)_itemFrame : Array.Empty<ItemLabel>();
+        // Monoliths are world-space (grid) → gate on the same zone-load guard, and only when the bundle's
+        // own area hash matches the live area (the bundle is published independently of the world snapshot).
+        var monoliths = worldFresh && mr.AreaHash == _areaHash
+            ? mr.Markers : (IReadOnlyList<MonolithMarker>)Array.Empty<MonolithMarker>();
 
         _state = new RadarState(inGame, snap.AreaHash, snap.AreaLevel, map.IsVisible, map.Zoom, player,
             snap.Entities, snap.Landmarks, _hpPct, _manaPct, _esPct, _autoFlask, _flaskNote,
-            snap.AreaCode, _charName, snap.CharLevel, _worldMs, _renderMs);
+            snap.AreaCode, _charName, snap.CharLevel, _worldMs, _renderMs, mr.Markers, _fps);
 
         var realActive = _gameHwnd != 0 && GetForegroundWindow() == _gameHwnd;
         // "Always show" draws the overlay even when PoE2 isn't focused (for dashboard calibration).
@@ -561,7 +1009,7 @@ public sealed class RadarApp : IDisposable
             Resolve: _resolveEntity,
             ResolveTile: _resolveTileDraw,
             AtlasOpen: ar.Open,
-            AtlasNodes: ar.Marks,
+            AtlasNodes: _atlasMarkFrame,   // marks with per-frame-fresh relPos (smooth pan), not the baked world-walk positions
             // Projection: derived live from the window height (UIscale = winH/1600) × live zoom. relPos is
             // read live so pan is already handled; the zoom term is folded into the scale. atlasProj is the
             // 8-coeff homography layout {h0..h7}. This is what makes non-1080p resolutions line up.
@@ -574,11 +1022,23 @@ public sealed class RadarApp : IDisposable
             AtlasPersX: (float)atlasProj[6],
             AtlasPersY: (float)atlasProj[7],
             // F10 route: START/END markers + the graph path between them (from the atlas render bundle).
-            AtlasStart: (ar.Open && _settings.AtlasShowRoute) ? ar.Start : null,
-            AtlasEnd: (ar.Open && _settings.AtlasShowRoute) ? ar.End : null,
-            AtlasRoute: (ar.Open && _settings.AtlasShowRoute && ar.Route is { Count: >= 2 }) ? ar.Route : null,
+            AtlasStart: (ar.Open && _settings.AtlasShowRoute) ? atlasStart : null,
+            AtlasEnd: (ar.Open && _settings.AtlasShowRoute) ? atlasEnd : null,
+            AtlasRoute: (ar.Open && _settings.AtlasShowRoute) ? atlasRoute : null,
+            // Auto-route from the current node to tracked tiles + the "you are here" marker (improvement 1).
+            AtlasCurrent: (ar.Open && _settings.AtlasShowRoute) ? atlasCurrent : null,
+            AtlasAutoRoutes: (ar.Open && _settings.AtlasShowRoute && _settings.AtlasAutoRoute) ? atlasAutoRoutes : null,
+            AtlasBiomeBorder: _settings.AtlasShowBiomeBorder,
             // Rune-crafting reward prices (screen-space; only when the panel is open).
-            RuneLabels: rr.Open ? rr.Labels : null);
+            RuneLabels: rr.Open ? rr.Labels : null,
+            // Ritual tribute-shop reward prices (screen-space; only when the shop is open).
+            RitualRewards: rit.Open ? rit.Labels : null,
+            // Loot-tag value chips (screen-space; rects re-read live each frame, so no zone-load gate needed —
+            // a stale element just fails the rect read and drops out).
+            LootTags: _lootTagFrame.Count > 0 ? _lootTagFrame : null,
+            // Runeshape monoliths: value-coloured map markers + nearby reward panel (world-space).
+            Monoliths: monoliths,
+            ShowMonolithPanel: _settings.Monoliths.ShowPanel);
         // The overlay is only visible while PoE2 is foreground (Render draws nothing otherwise). Skip
         // the whole draw + UpdateLayeredWindow blit when unfocused — but render once on the focus-loss
         // transition so the last visible frame is cleared rather than left frozen on screen.
@@ -685,6 +1145,15 @@ public sealed class RadarApp : IDisposable
         // Rune-crafting reward prices — cheap when the panel is closed (the fingerprint walk bails at the
         // visible-gate step). Publishes its own _runeRender bundle.
         UpdateRuneforge(inGameState);
+        UpdateRitualRewards(inGameState);
+
+        // Loot-tag value chips — throttled, invisible-subtree-pruned UI scan; matches tag text → price.
+        // Publishes its own _lootTags bundle (render thread re-reads each tag's live rect).
+        UpdateLootTags(inGameState);
+
+        // Runeshape monolith rewards — resolve each in-world monolith device + price its offered rewards
+        // (area-wide, before the panel is opened). Publishes its own _monoRender bundle.
+        UpdateMonoliths(areaInstance, areaLevel, areaHash);
 
 
         // Rebuild the unified navigation-target list (tiles + entity POIs) for this tick.
@@ -842,40 +1311,70 @@ public sealed class RadarApp : IDisposable
         if (enabled is null) return labels;
         foreach (var e in _entities)
         {
-            if (e.ItemArt is not { Length: > 0 } art) continue;     // not a (resolved) ground item
-            // Resolve by art basename (uniques + currency/rune/essence/… all indexed by art in the PriceBook).
-            if (_priceBook.TryByArt(art) is not { } pr) continue;    // unknown art → no label
-            if (cfg.MinQuantity > 0 && pr.Quantity < cfg.MinQuantity) continue; // skip low-confidence mislistings
-            if (!enabled.Contains(CategoryGroup(pr.Category))) continue;        // category toggled off
+            // Needs at least an art (uniques) or a rendered name (everything else) to resolve.
+            if (e.ItemArt is not { Length: > 0 } && e.ItemName is not { Length: > 0 }) continue;
 
-            // World-projected labels are now ONLY the fallback for UNIDENTIFIED UNIQUES — the one case the
-            // loot-tag overlay can't price (the game's tag shows the base type, not the unique name). Every
-            // other priced drop is labelled by the tag overlay (drawn ON the game's tag, perfectly aligned,
-            // no jitter). For an unID unique we reveal the resolved name + value at its world position.
-            if (e.Rarity != Poe2Live.Rarity.Unique || e.ItemIdentified) continue;
-            if (pr.Exalted < cfg.UniqueMinEx) continue;
+            // RESOLVE by the rendered base NAME for everything EXCEPT uniques. Currency/runes/essences share
+            // one .dds art across tiers, so art mis-prices them (a plain Exalted read as Perfect's 678ex);
+            // the exact name does not. UNIQUES use art — each unique has its own icon (no collision) AND an
+            // unidentified unique's name is hidden by the game, so art is the only key that works for them.
+            var isUnique = e.Rarity == Poe2Live.Rarity.Unique;
+            // When values are anchored to the game's loot tags, the world-projected label is reserved for
+            // UNIDENTIFIED uniques only — the game hides their name, so there's no tag text to match. Every
+            // other priced drop (currency/runes/essences/identified uniques) is drawn on its loot tag in
+            // UpdateLootTags instead, so skip it here to avoid a double label.
+            if (cfg.AnchorValuesToTags && !(isUnique && !e.ItemIdentified)) continue;
+            var lookup = isUnique
+                ? _priceBook.TryByArt(e.ItemArt)
+                : (e.ItemName is { Length: > 0 } nm ? _priceBook.TryByName(nm) : null);
+            if (lookup is not { } pr) continue;
+            if (cfg.MinQuantity > 0 && pr.Quantity < cfg.MinQuantity) continue; // skip low-confidence mislistings
+            var group = CategoryGroup(pr.Category);
+            if (!enabled.Contains(group)) continue;                 // category group toggled off
+            if (pr.Exalted < GroundFloor(group)) continue;          // below this bucket's value floor (Unique/Currency/Other)
             if (!_live.TryBarComponents(e.Address, out var render, out _)) continue;
-            labels.Add(new ItemLabelSpec(render, pr.Name, _priceBook.Format(pr.Exalted), pr.Exalted >= cfg.HighlightMinEx, ShowName: true));
+            // Reveal the NAME only for an UNIDENTIFIED unique (the game's tag hides it). Everything else —
+            // identified uniques, currency, runes, essences, … — draws a value-only chip over the drop.
+            var showName = isUnique && !e.ItemIdentified;
+            labels.Add(new ItemLabelSpec(render, pr.Name, _priceBook.Format(pr.Exalted), pr.Exalted >= cfg.HighlightMinEx, ShowName: showName));
         }
         return labels;
     }
 
-    /// <summary>Map a poe2scout price category to the user-facing ground-item group key
-    /// (<see cref="GroundItemSettings.Categories"/>). The six unique categories collapse to "Uniques".</summary>
-    private static string CategoryGroup(string category) => category switch
+    /// <summary>Map a PriceBook category (the poe.ninja overview TYPE string — "Currency", "UniqueWeapons",
+    /// "SoulCores", …) to the user-facing ground-item GROUP key (<see cref="GroundItemSettings.Categories"/>).
+    /// The unique sub-types collapse to "Uniques"; the rest pass through. (Earlier this switched on poe2scout's
+    /// lowercase names and so returned "Other" for every poe.ninja type — the bug that hid all non-uniques.)</summary>
+    private static string CategoryGroup(string category)
     {
-        "weapon" or "armour" or "accessory" or "flask" or "jewel" or "sanctum" => "Uniques",
-        "runes" => "Runes",
-        "essences" => "Essences",
-        "currency" => "Currency",
-        "fragments" => "Fragments",
-        "breach" => "Breach",
-        "ritual" => "Ritual",
-        "delirium" => "Delirium",
-        "expedition" => "Expedition",
-        "ultimatum" => "Ultimatum",
-        "abyss" => "Abyss",
-        _ => "Other",
+        if (category.StartsWith("Unique", StringComparison.OrdinalIgnoreCase)) return "Uniques";
+        return category switch
+        {
+            "PrecursorTablets" => "Tablets",
+            "Currency"   => "Currency",
+            "Runes"      => "Runes",
+            "SoulCores"  => "SoulCores",
+            "Essences"   => "Essences",
+            "Fragments"  => "Fragments",
+            "UncutGems"  => "UncutGems",
+            "Delirium"   => "Delirium",
+            "Breach"     => "Breach",
+            "Ritual"     => "Ritual",
+            "Abyss"      => "Abyss",
+            "Expedition" => "Expedition",
+            "Verisium"   => "Verisium",
+            "Idols"      => "Idols",
+            "LineageSupportGems" => "Gems",
+            _ => "Other",
+        };
+    }
+
+    /// <summary>The Exalted value FLOOR for a group, from its threshold bucket (Uniques / Currency / Other).</summary>
+    private double GroundFloor(string group) => group switch
+    {
+        "Uniques"  => _settings.GroundItems.UniqueMinEx,
+        "Currency" => _settings.GroundItems.CurrencyMinEx,
+        _          => _settings.GroundItems.OtherMinEx,
     };
 
     /// <summary>Parse a "#RRGGBB" hex colour to packed 0xFFRRGGBB once (opacity = 1, matching the old
@@ -1014,7 +1513,9 @@ public sealed class RadarApp : IDisposable
         // name is unusual: the REAL map name (WorldAreas +0x08), the raw internal code (never localized,
         // always a safe match key), the rolled content tags, biome and grid coord.
         var content = b.Tags.Count > 0 ? string.Join(", ", b.Tags) : "(none)";
-        Console.WriteLine($"\n[atlas tile] \"{b.MapName}\"  code={b.MapCode}  grid={b.Grid}  biome={b.Biome}");
+        Console.WriteLine($"\n[atlas tile] \"{b.MapName}\"  code={b.MapCode}  kind={b.Kind}  grid={b.Grid}  biome={b.Biome}");
+        // Status cross-validation (improvement 1): deeper-model accessible/completed vs the element flag bits.
+        Console.WriteLine($"            accessible={b.Accessible} completed={b.Completed}  (elem flags=0x{b.Flags:X2}: unlocked={b.Unlocked} visited={b.Visited})");
         Console.WriteLine($"             content: {content}");
         Console.WriteLine($"             web-UI filters -> Map: \"{b.MapName}\"" + (b.Tags.Count > 0 ? $"   Content: {content}" : ""));
 
@@ -1545,9 +2046,14 @@ public sealed class RadarApp : IDisposable
             // group, so towers/temples/specific maps are highlightable independently of rolled content.
             allMaps = nodes.Where(n => !string.IsNullOrEmpty(n.MapName)).GroupBy(n => n.MapName)
                 .OrderBy(g => g.Key).Select(g => new { tag = g.Key, count = g.Count() }),
+            // Map-archetype KINDS present (Citadel / Boss / Tower / Unique / Merchant) — first-class track
+            // targets (improvement 3): tracking "Tower" rings/routes EVERY tower without listing each name.
+            allKinds = nodes.Where(n => !string.IsNullOrEmpty(n.Kind) && n.Kind != "Normal").GroupBy(n => n.Kind)
+                .OrderByDescending(g => g.Count()).Select(g => new { tag = g.Key, count = g.Count() }),
             // The currently active rules (persisted): tracked tags (rings) + arrow tags (off-screen
             // direction). Match against BOTH content tags and map names.
             highlightTags = _settings.AtlasHighlightTags,
+            navTags = _settings.AtlasNavTags,
             arrowTags = _settings.AtlasArrowTags,
             // The individual live nodes for the dashboard's grid. On-screen first, then content/unvisited.
             nodeList = nodes
@@ -1558,6 +2064,7 @@ public sealed class RadarApp : IDisposable
                     el = ((long)n.Element).ToString(), // unique stable key (element address) for selection
                     id = n.Id, biome = (int)n.Biome, type = n.IconType, hasContent = n.HasContent,
                     unlocked = n.Unlocked, visited = n.Visited, visible = n.Visible,
+                    accessible = n.Accessible, completed = n.Completed, kind = n.Kind,
                     x = (int)n.X, y = (int)n.Y, map = n.MapName, tags = n.Tags,
                 }),
         };
@@ -1592,6 +2099,9 @@ public sealed class RadarApp : IDisposable
         // render thread) and the dashboard node selection (written by the API thread).
         (int X, int Y)? startGrid, goalGrid; HashSet<nint> sel;
         lock (_atlasLock) { startGrid = _atlasStartGrid; goalGrid = _atlasGoalGrid; sel = new HashSet<nint>(_atlasSel); }
+        // The player's CURRENT atlas node (the route source for auto-navigation). Changes only on zone
+        // change, but it MUST feed the freeze signature so the auto-routes re-solve as the player advances.
+        var curGrid = _atlas.CurrentNodeGrid();
 
         // ARROW JITTER FIX — freeze the marks when the atlas view is static. PoE2 doesn't keep CULLED
         // (off-screen) UI elements' relPos cleanly updated, so off-screen nodes' positions are noisy — which
@@ -1619,6 +2129,9 @@ public sealed class RadarApp : IDisposable
             ^ ((long)sel.Count << 36)
             ^ (_settings.AtlasDrawAll ? 1L << 44 : 0L);
         long sig = viewSig * 2654435761L ^ inputSig;
+        sig = sig * 1000003L ^ (curGrid?.GetHashCode() ?? 0);                       // re-solve routes as the player moves
+        sig = sig * 1000003L ^ (_settings.AtlasAutoRoute ? 1L : 0L) ^ ((long)_settings.AtlasAutoRouteMaxHops << 1);
+        sig = sig * 1000003L ^ (long)(_settings.AtlasNavTags?.Count ?? 0);          // re-solve when the nav set changes
         if (_builtAtlasOnce && _atlas.AllTagsResolved && sig == _lastAtlasSig)
             return;   // view + inputs unchanged → marks/route stay frozen (off-screen arrows don't jitter)
         _lastAtlasSig = sig; _builtAtlasOnce = true;
@@ -1633,8 +2146,9 @@ public sealed class RadarApp : IDisposable
                            .Select(n => n.MapName).Distinct().ToList();
             if (cit.Count > 0)
             {
-                _settings.AtlasHighlightTags = new List<string>(cit);
-                _settings.AtlasArrowTags = new List<string>(cit);
+                _settings.AtlasHighlightTags = new List<string>(cit); // ring
+                _settings.AtlasNavTags = new List<string>(cit);       // + auto-route to them
+                _settings.AtlasArrowTags = new List<string>(cit);     // + off-screen arrow
                 foreach (var c in cit) _settings.AtlasHighlightColors[c] = "#e0b341"; // Citadel gold
                 _settings.AtlasRulesInitialized = true;
                 _settings.Save();
@@ -1644,32 +2158,78 @@ public sealed class RadarApp : IDisposable
         // A node matches a rule set if its map name or one of its content tags is in the set; returns the
         // matched tag (drives label + colour). Track set ⇒ draw a ring; Arrow set ⇒ off-screen edge arrow.
         var hlTrack = new HashSet<string>(_settings.AtlasHighlightTags ?? new(), StringComparer.OrdinalIgnoreCase);
+        var hlNav = new HashSet<string>(_settings.AtlasNavTags ?? new(), StringComparer.OrdinalIgnoreCase);
         var hlArrow = new HashSet<string>(_settings.AtlasArrowTags ?? new(), StringComparer.OrdinalIgnoreCase);
+        // A node matches a rule set if its map name, one of its content tags, OR its map-archetype KIND
+        // (Citadel/Boss/Tower/Unique/Merchant — improvement 3) is in the set. Returns the matched token.
         static string? Match(HashSet<string> set, in Poe2Atlas.AtlasNodeLive nd)
         {
             if (set.Count == 0) return null;
             if (!string.IsNullOrEmpty(nd.MapName) && set.Contains(nd.MapName)) return nd.MapName;
             if (nd.Tags is { Count: > 0 }) foreach (var t in nd.Tags) if (set.Contains(t)) return t;
+            if (!string.IsNullOrEmpty(nd.Kind) && nd.Kind != "Normal" && set.Contains(nd.Kind)) return nd.Kind;
             return null;
         }
         var marks = new List<AtlasMark>(128);
+        // Routing inputs gathered alongside the marks: grid→node ELEMENT (so the render thread re-reads each
+        // route point's live relPos per frame), the tracked tiles to route to, and each tile's ring colour.
+        var gridToPoint = new Dictionary<(int, int), AtlasPoint>(nodes.Count);
+        var trackedGrids = new List<(int, int)>();
+        var gridColor = new Dictionary<(int, int), string?>();
+        foreach (var n in nodes) gridToPoint[n.Grid] = new AtlasPoint(n.Element, n.X, n.Y);
         foreach (var n in nodes)
         {
             var selected = sel.Contains(n.Element);
             var mTrack = Match(hlTrack, n);
+            var mNav = Match(hlNav, n);
             var mArrow = Match(hlArrow, n);
-            var isTracked = selected || mTrack != null;
-            var isArrow = mArrow != null;
-            // ONLY tracked/arrow maps are drawn (the point: surface content the game hides). AtlasDrawAll
-            // debug overrides this to draw every node.
-            if (!_settings.AtlasDrawAll && !isTracked && !isArrow) continue;
-            var matched = mTrack ?? mArrow;
+            var isTracked = selected || mTrack != null;   // Highlight (ring)
+            var isNav = mNav != null;                     // Nav-to (route line)
+            var isArrow = mArrow != null;                 // Arrow (off-screen pointer)
+            // ONLY highlighted/nav/arrow maps are drawn (the point: surface content the game hides).
+            // AtlasDrawAll debug overrides this to draw every node.
+            if (!_settings.AtlasDrawAll && !isTracked && !isNav && !isArrow) continue;
+            var matched = mTrack ?? mNav ?? mArrow;
             var label = matched ?? (n.Tags is { Count: > 0 } ? n.Tags[0] : (string.IsNullOrEmpty(n.MapName) ? null : n.MapName));
             string? color = matched != null && _settings.AtlasHighlightColors.TryGetValue(matched, out var c) ? c : null;
-            marks.Add(new AtlasMark(n.X, n.Y, isTracked, n.HasContent, n.Visited, n.Unlocked, n.Biome, n.IconType, label, color, isArrow));
+            // Route to NAV tiles that aren't already done — independent of the ring/arrow toggles.
+            if (isNav && !n.Completed) { trackedGrids.Add(n.Grid); gridColor[n.Grid] = color; }
+            marks.Add(new AtlasMark(n.X, n.Y, isTracked, n.HasContent, n.Visited, n.Unlocked, n.Biome, n.IconType, label, color, isArrow, isNav, n.Element));
         }
+
+        // ── Auto-routing (improvement 1): "you are here" + a route to each tracked tile ──────────────
+        // Sources = the player's CURRENT atlas node when known, else the accessible-now frontier (every
+        // map you can run right now). One multi-source BFS gives the fewest-hops route to each tracked tile.
+        AtlasPoint? currentPt = (curGrid is { } cg && gridToPoint.TryGetValue(cg, out var ce)) ? ce : null;
+        var autoRoutes = new List<AtlasAutoSpec>();
+        if (_settings.AtlasAutoRoute && trackedGrids.Count > 0)
+        {
+            // Sources = the ACCESSIBLE-NOW frontier (every map you can run right now) — fixed regardless of
+            // the mouse. We deliberately do NOT seed from the current-node marker: on some patches that
+            // element tracks the HOVERED tile, which made every route re-origin from the cursor ("navs to
+            // whatever I mouse over"). Fall back to the marker only when no accessible node is known (rare).
+            var sources = new List<(int, int)>();
+            foreach (var n in nodes) if (n.Accessible) sources.Add(n.Grid);
+            if (sources.Count == 0 && curGrid is { } c0 && _atlas.GraphHas(c0)) sources.Add(c0);
+            if (sources.Count > 0)
+            {
+                foreach (var kv in _atlas.RoutesFromSources(sources, trackedGrids).OrderBy(r => r.Value.Count))
+                {
+                    int hops = kv.Value.Count - 1;
+                    if (hops <= 0) continue;                                       // already on the tile
+                    if (_settings.AtlasAutoRouteMaxHops > 0 && hops > _settings.AtlasAutoRouteMaxHops) continue;
+                    var pts = new List<AtlasPoint>(kv.Value.Count);
+                    foreach (var gp in kv.Value) if (gridToPoint.TryGetValue(gp, out var ep)) pts.Add(ep);
+                    if (pts.Count < 2) continue;
+                    gridColor.TryGetValue(kv.Key, out var col);
+                    autoRoutes.Add(new AtlasAutoSpec(pts, col, hops));
+                    if (autoRoutes.Count >= 30) break;                            // keep the view readable
+                }
+            }
+        }
+
         var (start, end, route) = BuildAtlasRoute(nodes, startGrid, goalGrid);
-        _atlasRender = new AtlasRender(true, marks, start, end, route);   // publish atomically
+        _atlasRender = new AtlasRender(true, marks, start, end, route, currentPt, autoRoutes);   // publish atomically
     }
 
     /// <summary>Resolve the F10 START/END grid coords to canvas-space (relPos) points for the markers, and —
@@ -1678,23 +2238,23 @@ public sealed class RadarApp : IDisposable
     /// <paramref name="nodes"/>, so its relPos is available even when off-screen). Returns (startPt, endPt,
     /// route) for the caller to fold into the published <see cref="AtlasRender"/>. Logs once when a freshly-set
     /// END produces (or fails to produce) a path, so we can see whether the graph connected the two.</summary>
-    private (NumVec2? Start, NumVec2? End, List<NumVec2> Route) BuildAtlasRoute(
+    private (AtlasPoint? Start, AtlasPoint? End, List<AtlasPoint> Route) BuildAtlasRoute(
         IReadOnlyList<Poe2Atlas.AtlasNodeLive> nodes, (int X, int Y)? startGrid, (int X, int Y)? goalGrid)
     {
-        var route = new List<NumVec2>();
-        NumVec2? startPt = null, endPt = null;
+        var route = new List<AtlasPoint>();
+        AtlasPoint? startPt = null, endPt = null;
         if (nodes.Count == 0) return (null, null, route);
 
-        var gridToRel = new Dictionary<(int, int), NumVec2>(nodes.Count);
-        foreach (var n in nodes) gridToRel[n.Grid] = new NumVec2(n.X, n.Y);
+        var gridToPoint = new Dictionary<(int, int), AtlasPoint>(nodes.Count);
+        foreach (var n in nodes) gridToPoint[n.Grid] = new AtlasPoint(n.Element, n.X, n.Y);
 
-        if (startGrid is { } s && gridToRel.TryGetValue(s, out var sp)) startPt = sp;
-        if (goalGrid is { } g && gridToRel.TryGetValue(g, out var gp)) endPt = gp;
+        if (startGrid is { } s && gridToPoint.TryGetValue(s, out var sp)) startPt = sp;
+        if (goalGrid is { } g && gridToPoint.TryGetValue(g, out var gp)) endPt = gp;
 
         if (startGrid is { } start && goalGrid is { } goal)
         {
             var path = _atlas.FindPath(start, goal);
-            if (path != null) foreach (var p in path) if (gridToRel.TryGetValue(p, out var rp)) route.Add(rp);
+            if (path != null) foreach (var p in path) if (gridToPoint.TryGetValue(p, out var rp)) route.Add(rp);
             // Log once per (start,goal) pair so we can see graph connectivity (or the lack of it).
             if (_loggedRoute != (start, goal))
             {
@@ -1717,19 +2277,21 @@ public sealed class RadarApp : IDisposable
     /// <summary>API: set the active atlas highlight rules (tag + ring colour). Only nodes whose content
     /// tags or map name match one of these are drawn in-game, in the rule's colour. Persisted; applied on
     /// the next world tick. Draw-only.</summary>
-    public void SetAtlasHighlight(IReadOnlyList<(string tag, string color, bool track, bool arrow)> rules)
+    public void SetAtlasHighlight(IReadOnlyList<(string tag, string color, bool track, bool nav, bool arrow)> rules)
     {
-        var tags = new List<string>(); var arrows = new List<string>();
+        var tags = new List<string>(); var navs = new List<string>(); var arrows = new List<string>();
         var colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (tag, color, track, arrow) in rules)
+        foreach (var (tag, color, track, nav, arrow) in rules)
         {
             if (string.IsNullOrWhiteSpace(tag) || !seen.Add(tag)) continue;
             if (track) tags.Add(tag);
+            if (nav) navs.Add(tag);
             if (arrow) arrows.Add(tag);
             if (!string.IsNullOrWhiteSpace(color)) colors[tag] = color;
         }
         _settings.AtlasHighlightTags = tags;
+        _settings.AtlasNavTags = navs;
         _settings.AtlasArrowTags = arrows;
         _settings.AtlasHighlightColors = colors;
         _settings.AtlasRulesInitialized = true;   // any explicit edit locks out the Citadel default-seed
@@ -1759,6 +2321,64 @@ public sealed class RadarApp : IDisposable
 
     [StructLayout(LayoutKind.Sequential)] private struct CursorPoint { public int X, Y; }
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out CursorPoint p);
+
+    // Raise the system timer resolution to 1 ms so the render-loop frame pacer (Thread.Sleep) is accurate.
+    // Without this, Windows' default ~15.6 ms timer granularity caps ANY Thread.Sleep-paced loop at ~64 fps —
+    // which made the overlay judder on high-refresh monitors regardless of FpsCap.
+    [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint uPeriod);
+    [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
+
+    // Detect the refresh rate of the monitor the game window is currently on, so FpsCap=0 ("auto") matches it.
+    [DllImport("user32.dll")] private static extern nint MonitorFromWindow(nint hwnd, uint dwFlags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfoW(nint hMonitor, ref MonitorInfoEx lpmi);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool EnumDisplaySettingsW(string? lpszDeviceName, int iModeNum, ref DevMode lpDevMode);
+
+    [StructLayout(LayoutKind.Sequential)] private struct DisplayRect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public uint cbSize;
+        public DisplayRect rcMonitor, rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    }
+
+    // Only the head of DEVMODEW matters up to dmDisplayFrequency; the layout below mirrors DEVMODEW exactly
+    // through that field (the display union is dmPosition(8)+orientation(4)+fixedOutput(4)).
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DevMode
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX, dmPositionY;
+        public uint dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+        public uint dmPanningWidth, dmPanningHeight;
+    }
+
+    /// <summary>Refresh rate (Hz) of the monitor the game window is on, or 0 if it can't be determined
+    /// (e.g. dmDisplayFrequency reports 0/1 = "default"). Used only when FpsCap is set to 0 (auto-match).</summary>
+    private int DetectGameMonitorHz(nint hwnd)
+    {
+        try
+        {
+            if (hwnd == 0) return 0;
+            var hmon = MonitorFromWindow(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */);
+            if (hmon == 0) return 0;
+            var mi = new MonitorInfoEx { cbSize = (uint)Marshal.SizeOf<MonitorInfoEx>() };
+            if (!GetMonitorInfoW(hmon, ref mi)) return 0;
+            var dm = new DevMode { dmSize = (ushort)Marshal.SizeOf<DevMode>() };
+            if (!EnumDisplaySettingsW(mi.szDevice, -1 /* ENUM_CURRENT_SETTINGS */, ref dm)) return 0;
+            return dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 0;
+        }
+        catch { return 0; }
+    }
 
     public void Dispose()
     {

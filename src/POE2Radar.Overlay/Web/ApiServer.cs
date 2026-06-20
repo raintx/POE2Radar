@@ -60,7 +60,7 @@ public sealed class ApiServer : IDisposable
     // Atlas node selection (element addresses) to highlight in-game; draw-only, loopback-gated.
     private readonly Action<IReadOnlyList<long>>? _atlasSelect;
     // Atlas highlight rules (tag + colour + track/arrow) — only matching nodes draw in-game; loopback-gated.
-    private readonly Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? _atlasHighlight;
+    private readonly Action<IReadOnlyList<(string tag, string color, bool track, bool nav, bool arrow)>>? _atlasHighlight;
     // Version/update info provider ({current, latest, updateAvailable, url}) for the dashboard banner.
     private readonly Func<object>? _version;
     private volatile bool _running;
@@ -81,7 +81,7 @@ public sealed class ApiServer : IDisposable
         Func<object>? pricesProvider = null,
         Func<object>? atlasProvider = null,
         Action<IReadOnlyList<long>>? atlasSelect = null,
-        Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? atlasHighlight = null,
+        Action<IReadOnlyList<(string tag, string color, bool track, bool nav, bool arrow)>>? atlasHighlight = null,
         Func<object>? versionProvider = null,
         int port = 7777)
     {
@@ -157,7 +157,15 @@ public sealed class ApiServer : IDisposable
                     poiCount = s.Entities.Count(e => e.Poi),
                     landmarkCount = s.Landmarks.Count,
                     counts,
-                    worldMs = s.WorldMs, renderMs = s.RenderMs,
+                    worldMs = s.WorldMs, renderMs = s.RenderMs, fps = s.Fps,
+                    // Runeshape monoliths in the area (slot count + anchor + priced reward set) for the
+                    // dashboard's Monolith Rewards card. Rewards are pre-sorted by value, server-side.
+                    monoliths = (s.Monoliths ?? Array.Empty<MonolithMarker>()).Select(m => new
+                    {
+                        holes = m.Holes, unique = m.IsUnique, collected = m.Collected, anchor = m.AnchorName,
+                        bestEx = m.BestEx, bestName = m.BestName, color = m.Color,
+                        rewards = m.Rewards.Select(r => new { name = r.Name, count = r.Count, ex = r.Ex, size = r.Size, runes = r.Runes }),
+                    }),
                 }, Json));
                 break;
             }
@@ -205,7 +213,7 @@ public sealed class ApiServer : IDisposable
                         id = e.Id, addr = $"0x{e.Address:X}", category = e.Category.ToString(), metadata = e.Metadata,
                         name = EntityNameResolver.Shared.ResolveOrShorten(e.Metadata),
                         poi = e.Poi, iconComplete = e.IconComplete, opened = e.Opened, reaction = e.Reaction, friendly = e.IsFriendly, rarity = e.Rarity.ToString(),
-                        mods = e.ModList, itemArt = e.ItemArt,
+                        mods = e.ModList, itemArt = e.ItemArt, itemName = e.ItemName,
                         x = e.Grid.X, y = e.Grid.Y, hpCur = e.HpCur, hpMax = e.HpMax,
                         alive = e.HpMax <= 0 || e.HpCur > 0,
                         dist = (int)Dist(e.Grid, s.Player),
@@ -365,23 +373,24 @@ public sealed class ApiServer : IDisposable
                 // Set the active atlas highlight rules (content tags). Only matching nodes draw in-game.
                 if (ctx.Request.HttpMethod != "POST") { Write(ctx, 405, JsonSerializer.Serialize(new { error = "method not allowed" }, Json)); break; }
                 if (!IsLoopbackHost(ctx.Request)) { Write(ctx, 403, JsonSerializer.Serialize(new { error = "forbidden host" }, Json)); break; }
-                var rules = new List<(string tag, string color, bool track, bool arrow)>();
+                var rules = new List<(string tag, string color, bool track, bool nav, bool arrow)>();
                 try
                 {
                     using var doc = JsonDocument.Parse(ReadBody(ctx));
-                    // "rules":[{ "tag":"…", "color":"#RRGGBB", "track":true, "arrow":false }].
+                    // "rules":[{ "tag":"…", "color":"#RRGGBB", "track":true, "nav":false, "arrow":false }].
                     if (doc.RootElement.TryGetProperty("rules", out var rs) && rs.ValueKind == JsonValueKind.Array)
                         foreach (var r in rs.EnumerateArray())
                         {
                             var tg = r.TryGetProperty("tag", out var tv) ? tv.GetString() : null;
                             var col = r.TryGetProperty("color", out var cv) ? cv.GetString() : null;
                             var track = !r.TryGetProperty("track", out var tk) || tk.ValueKind != JsonValueKind.False; // default true
+                            var nav = r.TryGetProperty("nav", out var nv) && nv.ValueKind == JsonValueKind.True;
                             var arrow = r.TryGetProperty("arrow", out var aw) && aw.ValueKind == JsonValueKind.True;
-                            if (!string.IsNullOrEmpty(tg)) rules.Add((tg!, col ?? "", track, arrow));
+                            if (!string.IsNullOrEmpty(tg)) rules.Add((tg!, col ?? "", track, nav, arrow));
                         }
                     else if (doc.RootElement.TryGetProperty("tags", out var arr) && arr.ValueKind == JsonValueKind.Array)
                         foreach (var t in arr.EnumerateArray())
-                            if (t.ValueKind == JsonValueKind.String && t.GetString() is { Length: > 0 } tg) rules.Add((tg, "", true, false));
+                            if (t.ValueKind == JsonValueKind.String && t.GetString() is { Length: > 0 } tg) rules.Add((tg, "", true, false, false));
                 }
                 catch (JsonException) { }
                 _atlasHighlight?.Invoke(rules);
@@ -654,6 +663,8 @@ public sealed class ApiServer : IDisposable
             if (parsed == null) return false;
             parsed.HighlightMinEx = Math.Max(0, parsed.HighlightMinEx);
             parsed.UniqueMinEx = Math.Max(0, parsed.UniqueMinEx);
+            parsed.CurrencyMinEx = Math.Max(0, parsed.CurrencyMinEx);
+            parsed.OtherMinEx = Math.Max(0, parsed.OtherMinEx);
             parsed.MinQuantity = Math.Clamp(parsed.MinQuantity, 0, 100000);
             parsed.League = (parsed.League ?? "").Trim();
             parsed.Categories = (parsed.Categories ?? new())
@@ -920,7 +931,12 @@ public sealed record RadarState(
     // Threading validation timers: the last world-pass duration (background thread) and the last
     // render-frame duration (render thread), in milliseconds. Surfaced via /state for stress-testing.
     float WorldMs = 0,
-    float RenderMs = 0)
+    float RenderMs = 0,
+    // Runeshape monoliths in the current area (slot count, anchor, best value + full priced reward set) —
+    // served to the dashboard's Monolith Rewards card. Empty when none / feature disabled.
+    IReadOnlyList<MonolithMarker>? Monoliths = null,
+    // Measured effective render FPS (rolling window) — for verifying the overlay actually hits FpsCap.
+    float Fps = 0)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,
