@@ -39,13 +39,51 @@ public readonly record struct ItemLabel(Vector3 World, string Name, string Value
 
 /// <summary>One atlas node to highlight. <see cref="X"/>/<see cref="Y"/> are the node's canvas-space
 /// RelativePos; the renderer projects them to screen via the atlas transform (scale + offset).</summary>
-public readonly record struct AtlasMark(float X, float Y, bool Selected, bool HasContent, bool Visited, bool Unlocked, int Biome, int IconType, string? Label = null, string? Color = null, bool Arrow = false);
+/// <summary><see cref="Element"/> is the node's UiElement address; the render thread re-reads its
+/// RelativePos into <see cref="X"/>/<see cref="Y"/> every frame so rings track atlas pan smoothly (the
+/// X/Y published by the world walk are the last-known fallback). 0 = no live element.</summary>
+public readonly record struct AtlasMark(float X, float Y, bool Selected, bool HasContent, bool Visited, bool Unlocked, int Biome, int IconType, string? Label = null, string? Color = null, bool Arrow = false, bool Nav = false, nint Element = 0);
+
+/// <summary>One auto-route polyline from the player's current atlas node (or the accessible frontier) to a
+/// tracked target tile. <see cref="Points"/> are canvas-space node centers (relPos), projected with the
+/// same atlas transform as the marks; <see cref="Color"/> is the target rule's ring colour ("#RRGGBB" or
+/// null → default); <see cref="Hops"/> is the number of map steps (drawn as a chip at the target).</summary>
+public readonly record struct AtlasRouteInfo(IReadOnlyList<NumVec2> Points, string? Color, int Hops);
 
 /// <summary>One priced reward row in the "Runeshape Combinations" panel. <see cref="X"/>/<see cref="Y"/>/
 /// <see cref="W"/>/<see cref="H"/> are the reward row's SCREEN rect (already scaled, from Poe2Runeforge);
 /// the renderer draws <see cref="Text"/> (e.g. "5.4 ex") in <see cref="Color"/> (packed 0xAARRGGBB) just
 /// outside the row's right edge. Built at world rate in RadarApp; the renderer only positions + draws.</summary>
 public readonly record struct RuneLabel(float X, float Y, float W, float H, string Text, uint Color);
+
+/// <summary>A priced reward in the post-ritual TRIBUTE SHOP. <see cref="X"/>/<see cref="Y"/>/<see cref="W"/>/
+/// <see cref="H"/> are the reward tile's SCREEN rect (already scaled, from <c>Poe2Live.ReadRitualRewards</c>);
+/// the renderer draws <see cref="Text"/> (e.g. "12 ex") in <see cref="Color"/> (packed 0xAARRGGBB) on the
+/// tile, with a border when <see cref="Highlight"/>. Built at world rate in RadarApp; the renderer positions
+/// + draws. Drawn whenever the tribute shop is open.</summary>
+public readonly record struct RitualLabel(float X, float Y, float W, float H, string Text, uint Color, bool Highlight);
+
+/// <summary>A value chip drawn ON the game's own loot-tag UI element. <see cref="X"/>/<see cref="Y"/>/
+/// <see cref="W"/>/<see cref="H"/> are the tag's live SCREEN rect (game-computed via
+/// <c>Poe2Live.TryUiElementRect</c> → no world projection, no jitter, perfectly aligned); the renderer
+/// draws <see cref="Value"/> just past the right edge, with a border when <see cref="Highlight"/>. The match
+/// is made at world rate (the tag's text == the item name == the price key); the rect is re-read every
+/// render frame so the chip tracks the tag as the player moves.</summary>
+public readonly record struct LootTagLabel(float X, float Y, float W, float H, string Value, bool Highlight);
+
+/// <summary>One reward a runeshape monolith will offer (computed BEFORE the panel is opened, from the
+/// device→station read + offline catalog). <see cref="Ex"/> is the priced full-stack value in Exalted
+/// (0 = unpriced); <see cref="Runes"/> is the rune pattern (for tooltips/detail).</summary>
+public readonly record struct MonolithReward(string Name, int Count, double Ex, int Size, string Runes);
+
+/// <summary>A runeshape monolith to mark on the map. <see cref="Grid"/> is the device's grid position
+/// (projected like an entity dot / landmark); <see cref="Holes"/> is N (the slot count, drawn as a badge);
+/// <see cref="BestEx"/>/<see cref="BestName"/> is its most valuable offered reward; <see cref="Color"/>
+/// (packed 0xAARRGGBB) is the value tier. <see cref="Rewards"/> is the full priced offer set (panel +
+/// dashboard), value-sorted. Built at world rate in RadarApp; the renderer projects + draws.</summary>
+public sealed record MonolithMarker(
+    NumVec2 Grid, int Holes, bool IsUnique, bool Collected, string AnchorName,
+    double BestEx, string BestName, uint Color, IReadOnlyList<MonolithReward> Rewards);
 
 /// <summary>What the PoE2 renderer needs each frame. Built fresh by <see cref="RadarApp"/>.</summary>
 public sealed record RenderContext(
@@ -134,5 +172,21 @@ public sealed record RenderContext(
     NumVec2? AtlasStart = null,
     NumVec2? AtlasEnd = null,
     IReadOnlyList<NumVec2>? AtlasRoute = null,
+    // Auto-routing (improvement 1): the player's CURRENT atlas node (canvas-space relPos, drawn as a
+    // "you are here" marker) and one route per tracked target from there/the accessible frontier. Both
+    // projected with the atlas homography. Null/empty when auto-routing is off or no current node is known.
+    NumVec2? AtlasCurrent = null,
+    IReadOnlyList<AtlasRouteInfo>? AtlasAutoRoutes = null,
+    // Draw a biome-coloured border around tracked atlas labels (improvement 2). Mirrored from settings.
+    bool AtlasBiomeBorder = true,
     // Priced "Runeshape Combinations" reward labels (screen-space; drawn whenever the panel is open).
-    IReadOnlyList<RuneLabel>? RuneLabels = null);
+    IReadOnlyList<RuneLabel>? RuneLabels = null,
+    // Priced ritual tribute-shop reward labels (screen-space; drawn whenever the shop is open).
+    IReadOnlyList<RitualLabel>? RitualRewards = null,
+    // Value chips drawn ON the game's own loot tags (screen-space rects, re-read live each frame). Covers
+    // items the game already names; unidentified uniques use the world-projected ItemLabels instead.
+    IReadOnlyList<LootTagLabel>? LootTags = null,
+    // Runeshape monoliths to mark on the map (value-coloured icon + N badge + value/reward label) and
+    // list in the nearby-monolith panel. World-space (grid). Null/empty → none.
+    IReadOnlyList<MonolithMarker>? Monoliths = null,
+    bool ShowMonolithPanel = true);

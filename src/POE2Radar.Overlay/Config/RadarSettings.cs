@@ -32,9 +32,10 @@ public sealed class RadarSettings
 
     // ── Overlay render/present rate (Hz). The overlay redraws + UpdateLayeredWindow-blits at this
     //    rate; lower = less CPU/GPU tax on the game (the blit cost is proportional to resolution).
-    //    60 is plenty smooth for a radar; raise toward your monitor's refresh if you prefer. The
-    //    heavier entity/terrain walk stays fixed at ~30 Hz regardless. ──
-    public int FpsCap { get; set; } = 60;
+    //    0 = AUTO: match the refresh rate of the monitor the game is on (re-detected ~1/s) — recommended,
+    //    so fast screen-anchored elements (loot-value chips) track smoothly. Set a fixed number to cap it.
+    //    The heavier entity/terrain walk stays fixed at ~30 Hz regardless. ──
+    public int FpsCap { get; set; } = 0;
 
     // ── Navigation-menu widget: which screen corner it is pinned to.
     //    One of "TopLeft", "TopRight", "BottomLeft", "BottomRight". ──
@@ -78,6 +79,10 @@ public sealed class RadarSettings
     // Tags with the off-screen ARROW enabled: when a matching map is outside render distance, an edge
     // arrow points toward it (for hunting high-value maps you can't zoom out to). Independent of tracking.
     public List<string> AtlasArrowTags { get; set; } = new();
+    // Tags with NAV-TO enabled: a shortest-hop route line is drawn from the accessible frontier to each
+    // matching map. Independent of Highlight (ring) and Arrow — you can route to a map without ringing it,
+    // or ring without routing. This is the set the auto-router targets.
+    public List<string> AtlasNavTags { get; set; } = new();
     // Per-rule ring colour (tag → "#RRGGBB"), so each highlighted map draws in its filter's category
     // colour in-game (Citadel gold, Boss red, …). Set from the dashboard alongside AtlasHighlightTags.
     public Dictionary<string, string> AtlasHighlightColors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -90,6 +95,40 @@ public sealed class RadarSettings
     // Atlas routing: F10 over a tile sets it as the route destination; the overlay draws the shortest path
     // (through the node connection graph) from the player's current node to it. On by default.
     public bool AtlasShowRoute { get; set; } = true;
+    // Auto-routing: draw a shortest-hop route from the player's CURRENT atlas node (or the accessible-now
+    // frontier when the current node isn't known) to every tracked tile, with a hop-count chip per target.
+    // This is the "auto-navigate to the key tiles I'm tracking" feature. On by default.
+    public bool AtlasAutoRoute { get; set; } = true;
+    // Suppress auto-routes longer than this many map hops (0 = no limit). Keeps the view readable when a
+    // common content type (e.g. Breach) is tracked across the whole atlas.
+    public int AtlasAutoRouteMaxHops { get; set; } = 0;
+    // Draw a biome-coloured border around tracked map labels on the open Atlas (richer in-game info). On by default.
+    public bool AtlasShowBiomeBorder { get; set; } = true;
+
+    // One-time guard: false until the default "Abyss Lightless (Void)" monster display rule has been
+    // seeded into display_rules.json. Set true after seeding so a user who deletes the rule keeps it gone.
+    public bool AbyssRuleSeeded { get; set; }
+
+    // One-time guard: false until the curated icon glyphs have been applied to the stock display rules
+    // (Skull/Crown/Chest/MapPin/…). The migration only retouches rules still on their OLD default shape,
+    // so user customizations are preserved; set true afterward so it runs at most once.
+    public bool IconDefaultsApplied { get; set; }
+    // v2 guard: re-runs the icon migration with separator-insensitive name matching (the v1 pass missed the
+    // rules whose names contain "·" due to a code-point mismatch) and the monster Magic/Rare glyphs.
+    public bool IconDefaultsApplied2 { get; set; }
+    // One-time guard: removes the stale legacy "watched" Diamond rules that duplicated (and shadowed) the
+    // mechanic rules, gates Ritual/Breach/Essence to Object/Other so they can't tag league monsters, and
+    // reskins the remaining navigation-POI diamonds. Set true afterward so it runs at most once.
+    public bool RuleCleanupV1 { get; set; }
+    // One-time guard: gives the non-monster mechanic/special rules a default in-game LABEL where they had
+    // none (Strongbox/Essence/Shrine/Transition/chest rarities), so the marker shows text, not just an icon.
+    public bool MechanicLabelsV1 { get; set; }
+    // One-time guard: broadens the ground-item category set from the old {Uniques,Runes,Essences,Currency}
+    // to the full high-value set, now that non-uniques actually price + draw.
+    public bool GroundDefaultsV2 { get; set; }
+    // One-time guard: bumps the monster Magic/Rare/Unique rule sizes — the detailed Fang/Claw/Skull glyphs
+    // need ~1.5× the size the old flat shapes used to be legible at radar scale.
+    public bool IconSizesV1 { get; set; }
 
     // ── Auto-flask thresholds + per-flask cooldowns (milliseconds). ──
     // What the (single) life-flask key triggers on: "Health" watches HP% only (default — unchanged
@@ -122,6 +161,9 @@ public sealed class RadarSettings
 
     // ── Ground-item value overlay (unique drops): name + price over the loot icon, border if above value. ──
     public GroundItemSettings GroundItems { get; set; } = new();
+
+    // ── Runeshape-monolith reward overlay: value-coloured map icon + N badge + nearby reward panel. ──
+    public MonolithSettings Monoliths { get; set; } = new();
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -335,17 +377,41 @@ public sealed class TerrainSettings
 /// auto-detect the current league; set it to override. <see cref="MinQuantity"/> filters low-volume
 /// mislistings out of the overlay.
 /// </summary>
+public sealed class MonolithSettings
+{
+    public bool Enabled { get; set; } = true;
+    // Value tiers (best offered reward, Exalted): green ≥ HighlightMinEx, yellow from 0.6×, neutral below.
+    public double HighlightMinEx { get; set; } = 30.0;
+    public double MinRewardEx { get; set; } = 1.0;       // hide reward rows below this (panel + dashboard)
+    public bool HideCollected { get; set; } = true;      // hide monoliths whose reward was already claimed
+    public bool ShowPanel { get; set; } = true;          // the in-overlay nearby-monolith reward panel
+    public bool ShowMapLabel { get; set; } = true;       // draw the value + top-reward label at the icon
+    public float PanelMaxDistance { get; set; } = 0f;    // 0 = every monolith in the area; else only within N grid
+}
+
 public sealed class GroundItemSettings
 {
     public bool Enabled { get; set; } = true;
-    public double HighlightMinEx { get; set; } = 10.0;   // border when value ≥ this many Exalted
-    public double UniqueMinEx { get; set; } = 5.0;       // only label uniques worth ≥ this many Exalted (the
-                                                         // ground overlay now shows ONLY unidentified uniques)
+    public double HighlightMinEx { get; set; } = 10.0;   // border/emphasis when value ≥ this many Exalted
+    // Per-bucket value FLOORS (Exalted): a drop is labelled only if its value clears the floor for its
+    // bucket. Uniques / Currency / everything-else are tuned separately because their value scales differ.
+    public double UniqueMinEx { get; set; } = 5.0;       // uniques floor
+    public double CurrencyMinEx { get; set; } = 1.0;     // currency floor
+    public double OtherMinEx { get; set; } = 1.0;        // floor for everything else (runes/essences/fragments/…)
     public int MinQuantity { get; set; } = 2;            // skip listings with fewer than N for sale (confidence)
     public string League { get; set; } = "";             // blank = auto-detect current league
-    // Which item-value categories get a ground label. Group keys map to poe2scout categories (see
-    // RadarApp.CategoryGroup). Default: uniques + the common stackables. Empty list ⇒ nothing shows.
-    public List<string> Categories { get; set; } = new() { "Uniques", "Runes", "Essences", "Currency" };
+    // Draw the value chip ON the game's own loot tag (game-computed rect → no projection, no jitter) for
+    // everything the game already names (currency/runes/essences/fragments/identified uniques), matched by
+    // the tag's text. UNIDENTIFIED uniques (name hidden by the game) always use the world-projected reveal.
+    // When false, every priced drop uses the older world-projected chip (the pre-tag behavior).
+    public bool AnchorValuesToTags { get; set; } = true;
+    // Which item-value category GROUPS get a ground label (see RadarApp.CategoryGroup). Default: uniques +
+    // the high-value stackables. Empty list ⇒ nothing shows.
+    public List<string> Categories { get; set; } = new()
+    {
+        "Uniques", "Currency", "Runes", "SoulCores", "Essences", "Fragments",
+        "UncutGems", "Delirium", "Tablets", "Idols", "Abyss", "Ritual",
+    };
 }
 
 /// <summary>
@@ -356,17 +422,17 @@ public sealed class RadarStyles
 {
     // Monster dots by rarity.
     public IconStyle MonsterNormal { get; set; } = new("Circle",   "#FF3333", 0.95f, 2.6f);
-    public IconStyle MonsterMagic  { get; set; } = new("Diamond",  "#73A6FF", 0.97f, 3.4f);
-    public IconStyle MonsterRare   { get; set; } = new("Triangle", "#FFD926", 1.00f, 5.5f);
-    public IconStyle MonsterUnique { get; set; } = new("Star",     "#FF7300", 1.00f, 6.5f);
+    public IconStyle MonsterMagic  { get; set; } = new("Fang",     "#73A6FF", 0.97f, 5.5f);
+    public IconStyle MonsterRare   { get; set; } = new("Claw",     "#FFD926", 1.00f, 7.5f);
+    public IconStyle MonsterUnique { get; set; } = new("Skull",    "#FF7300", 1.00f, 8.0f);
 
     // Other entity categories.
-    public IconStyle Player        { get; set; } = new("Circle",  "#4DF2FF", 1.00f, 3.0f);
-    public IconStyle Npc           { get; set; } = new("Plus",    "#FFD933", 0.95f, 4.0f);
-    public IconStyle ChestRare     { get; set; } = new("Square",  "#FFD926", 0.95f, 5.0f);
-    public IconStyle ChestUnique   { get; set; } = new("Square",  "#FF7300", 0.95f, 5.0f);
-    public IconStyle Transition    { get; set; } = new("Diamond", "#66FF99", 0.95f, 4.5f);
-    public IconStyle Poi           { get; set; } = new("Circle",  "#8CBFFF", 0.70f, 3.0f);
+    public IconStyle Player        { get; set; } = new("Person",  "#4DF2FF", 1.00f, 3.4f);
+    public IconStyle Npc           { get; set; } = new("Chat",    "#FFD933", 0.95f, 4.2f);
+    public IconStyle ChestRare     { get; set; } = new("Chest",   "#FFD926", 0.95f, 5.0f);
+    public IconStyle ChestUnique   { get; set; } = new("Crown",   "#FF7300", 0.95f, 5.5f);
+    public IconStyle Transition    { get; set; } = new("Stairs",  "#66FF99", 0.95f, 5.0f);
+    public IconStyle Poi           { get; set; } = new("MapPin",  "#8CBFFF", 0.80f, 3.6f);
 
     // Tile landmarks (shape marker + text label at the group centroid).
     public IconStyle Landmark      { get; set; } = new("Diamond", "#F259F2", 1.00f, 5.0f);
@@ -381,16 +447,18 @@ public sealed class RadarStyles
         // dir-qualified key hits only "Expedition2/Expedition2Encounter" (NOT the "/Objects/...Crack"
         // path), and the Other gate keeps it off the monsters. ("ExpeditionEncounter" was also dead —
         // the real path is "Expedition2Encounter" with a digit, so that key matched nothing.)
-        new() { Name = "Expedition", Match = new() { "Expedition2/Expedition2Encounter" }, Categories = new() { "Other" }, Shape = "Plus", Color = "#26E6D9", Opacity = 1f, Size = 7f },
-        new() { Name = "Ritual",     Match = new() { "Ritual" },                            Shape = "Star",     Color = "#FF3355", Opacity = 1f, Size = 7f },
-        new() { Name = "Breach",     Match = new() { "Breach" },                            Shape = "Diamond",  Color = "#A64DFF", Opacity = 1f, Size = 7f },
+        new() { Name = "Expedition", Match = new() { "Expedition2/Expedition2Encounter" }, Categories = new() { "Other" }, Shape = "Flag", Color = "#26E6D9", Opacity = 1f, Size = 7f },
+        // Ritual/Breach/Essence are gated to the mechanic MARKER (Object/Other) so the bare substring can't
+        // hijack the league's combat monsters (e.g. "Metadata/Monsters/LeagueRitual/…", "…LeagueBreach/…").
+        new() { Name = "Ritual",     Match = new() { "Ritual" }, Categories = new() { "Object", "Other" },  Shape = "Star",     Color = "#FF3355", Opacity = 1f, Size = 7f },
+        new() { Name = "Breach",     Match = new() { "Breach" }, Categories = new() { "Object", "Other" },  Shape = "Portal",   Color = "#A64DFF", Opacity = 1f, Size = 7f },
         // Match the league-strongbox DIRECTORY only ("Metadata/Chests/StrongBoxes/…") and gate to
         // Chest. The bare "Strongbox" term was too broad twice over: it tagged the box's spawned Vaal
         // guards (…Strongbox monsters — now excluded by the Chest gate) AND ordinary area chests that
         // merely carry "Strongbox" in their name (e.g. Chests/KedgeBayChests/KedgeBayChestStrongbox).
         // "StrongBoxes" hits the real boxes (BasicStrongboxLow lives under it) but not those.
-        new() { Name = "Strongbox",  Match = new() { "StrongBoxes" }, Categories = new() { "Chest" }, Shape = "Square", Color = "#FFB300", Opacity = 1f, Size = 6f },
-        new() { Name = "Essence",    Match = new() { "Essence" },                           Shape = "Triangle", Color = "#33E0FF", Opacity = 1f, Size = 7f },
+        new() { Name = "Strongbox",  Match = new() { "StrongBoxes" }, Categories = new() { "Chest" }, Shape = "Chest", Color = "#FFB300", Opacity = 1f, Size = 6f },
+        new() { Name = "Essence",    Match = new() { "Essence" }, Categories = new() { "Object", "Other" }, Shape = "Flask",    Color = "#33E0FF", Opacity = 1f, Size = 7f },
         // Match the real shrine namespace ONLY (Metadata/Shrines/Shrine_Trigger). A bare "Shrine" substring
         // false-positives on terrain cosmetics/spawners (GoblinShrineCosmetic, GoblinShrineSpawnerLeap) and
         // the ShrineFireDaemon effect carrier — none of which are the clickable shrine mechanic.

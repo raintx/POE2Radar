@@ -26,7 +26,7 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, nint> _iconAddr = new();     // entity → MinimapIcon component (0 = none); game POI
     private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
     private readonly Dictionary<nint, string[]> _mods = new();     // entity → affix mod ids (static per spawn; cached; empty = no mods)
-    private readonly Dictionary<nint, (Rarity rarity, string? art, bool identified)> _itemIdent = new(); // WorldItem entity → dropped-item identity (static; cached)
+    private readonly Dictionary<nint, (Rarity rarity, string? art, bool identified, string? name)> _itemIdent = new(); // WorldItem entity → dropped-item identity (static; cached)
     private readonly Dictionary<nint, uint> _idAt = new();         // entity address → last-seen std::map key id (recycle guard)
     // Bounds the number of NEW (uncached) monster mod reads per Entities() pass so walking into a large
     // pack can't stall the world tick. Cached monsters cost nothing; new ones fill over a few ticks.
@@ -61,8 +61,11 @@ public sealed class Poe2Live
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, Vector3 World, EntityCategory Category, string Metadata,
         int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false,
-        IReadOnlyList<string>? Mods = null, string? ItemArt = null, bool ItemIdentified = true)
+        IReadOnlyList<string>? Mods = null, string? ItemArt = null, bool ItemIdentified = true, string? ItemName = null)
     {
+        // ItemName (positional): a dropped item's rendered BASE-TYPE display name (Base +0x10 → +0x30),
+        // e.g. "Greater Orb of Augmentation". The price key for NON-uniques (currency/runes/essences),
+        // where one .dds art is shared across tiers so art can't disambiguate. Null for non-items / unread.
         // ItemIdentified (positional): for a dropped unique, whether the game has identified it (Mods+0x90).
         // Drives the loot overlay's unique rule — unID → reveal the resolved name; ID → value only. Defaults
         // true so non-item / non-unique entities are never treated as "unidentified".
@@ -370,14 +373,14 @@ public sealed class Poe2Live
             var meta = _meta.GetValueOrDefault(entity, "");
             // Dropped items (WorldItem containers, categorized Other) carry a price-lookup identity: art
             // basename + rarity, read once off the inner item entity. Rarity then reflects the item.
-            string? itemArt = null;
+            string? itemArt = null, itemName = null;
             var itemIdentified = true;
             if (cat == EntityCategory.Other && meta.Contains("WorldItem", StringComparison.Ordinal))
-                (rarity, itemArt, itemIdentified) = ReadItemIdentity(entity);
+                (rarity, itemArt, itemIdentified, itemName) = ReadItemIdentity(entity);
 
             var (poi, iconComplete) = ReadIcon(entity);
             dots.Add(new EntityDot(id, entity, g, wv, cat, meta, hpCur, hpMax,
-                poi, ReadReaction(entity), rarity, opened, iconComplete, mods, itemArt, itemIdentified));
+                poi, ReadReaction(entity), rarity, opened, iconComplete, mods, itemArt, itemIdentified, itemName));
         }
         return dots;
     }
@@ -410,6 +413,60 @@ public sealed class Poe2Live
         if (icon == 0) return (false, false);
         var complete = _reader.TryReadStruct<int>(icon + Poe2.MinimapIcon.CompletedState, out var s) && s != 0;
         return (true, complete);
+    }
+
+    /// <summary>The live state of a runeshape-monolith device (the persistent Expedition2Encounter POI
+    /// entity), read off the device → StateMachine → RuneStation chain (see <see cref="Poe2.RuneStation"/>).
+    /// <paramref name="Resolved"/> false means the station chain didn't resolve (e.g. transient read, or the
+    /// device isn't a monolith). Feeds <see cref="RuneMonolithCatalog.Offers"/> to compute the rewards the
+    /// monolith will offer WITHOUT opening its panel. Persists out of the network bubble → readable
+    /// area-wide. <paramref name="Collected"/> = the MinimapIcon completed flag (reward already claimed).</summary>
+    public readonly record struct MonolithState(
+        bool Resolved, int HoleCount, int AnchorIdx, int AnchorPos, bool IsUnique, bool Collected);
+
+    /// <summary>Resolve a monolith device's hole count + anchor rune. Stateless per call (no caching — the
+    /// station ptr is stable per area but cheap to re-walk, and the caller throttles at world rate).</summary>
+    public MonolithState ReadMonolith(nint device)
+    {
+        var (_, collected) = ReadIcon(device);
+        var fail = new MonolithState(false, 0, -1, -1, false, collected);
+
+        var sm = ResolveComponent(device, "StateMachine");
+        if (sm == 0) return fail;
+        var first = Ptr(sm + Poe2.StateMachine.ListenerVec);
+        if (first == 0 || !_reader.TryReadStruct<nint>(sm + Poe2.StateMachine.ListenerVec + 8, out var last)) return fail;
+        var n = ((long)last - first) / 8;
+        if (n is <= 0 or > 256) return fail;
+
+        nint station = 0;
+        for (long i = 0; i < n; i++)
+        {
+            var node = Ptr(first + (nint)(i * 8));
+            if (node == 0) continue;
+            var sub = Ptr(node);                                   // = station + ListenerSub
+            if (sub == 0) continue;
+            var cand = sub - Poe2.RuneStation.ListenerSub;
+            if (Ptr(cand + Poe2.RuneStation.Owner) == device) { station = cand; break; }
+        }
+        if (station == 0) return fail;
+
+        if (!_reader.TryReadStruct<int>(station + Poe2.RuneStation.HoleCount, out var holes) || holes is <= 0 or > 16)
+            return fail;
+        _reader.TryReadStruct<int>(station + Poe2.RuneStation.AnchorPos, out var pos);
+
+        var rowPtr = Ptr(station + Poe2.RuneStation.AnchorRef);
+        if (rowPtr == 0) return new MonolithState(true, holes, -1, -1, true, collected); // anchor-less → "unique"
+
+        // anchor rune index = (rowPtr − tableBase)/RuneStride; tableBase is per-area (deref holder+0x28).
+        var holder = Ptr(station + Poe2.RuneStation.AnchorHolder);
+        var p1 = Ptr(holder + 0x28);
+        if (p1 == 0 || !_reader.TryReadStruct<long>(p1, out var tableBase) || tableBase == 0)
+            return new MonolithState(true, holes, -1, pos, false, collected); // station ok, anchor decode failed
+        var delta = (long)rowPtr - tableBase;
+        var idx = (delta >= 0 && delta % Poe2.RuneStation.RuneStride == 0)
+            ? (int)(delta / Poe2.RuneStation.RuneStride) : -1;
+        if (idx < 0 || idx >= Poe2.RuneStation.RuneCount) idx = -1;
+        return new MonolithState(true, holes, idx, pos, false, collected);
     }
 
     private Rarity ReadRarity(nint entity)
@@ -489,16 +546,26 @@ public sealed class Poe2Live
     /// once; new reads are bounded per pass by <see cref="_itemReadBudget"/>. Returns (rarity, artBasename);
     /// artBasename is null when the item can't be resolved.
     /// </summary>
-    private (Rarity, string?, bool) ReadItemIdentity(nint entity)
+    private (Rarity, string?, bool, string?) ReadItemIdentity(nint entity)
     {
         if (_itemIdent.TryGetValue(entity, out var cached)) return cached;
-        if (_itemReadBudget <= 0) return (Rarity.NonMonster, null, true);   // out of budget — retry next tick (don't cache)
+        if (_itemReadBudget <= 0) return (Rarity.NonMonster, null, true, null);   // out of budget — retry next tick (don't cache)
 
         var wi = ResolveComponent(entity, "WorldItem");
         var item = wi == 0 ? 0 : Ptr(wi + Poe2.WorldItemComponent.ItemEntity);
-        if (item == 0) { var v = (Rarity.NonMonster, (string?)null, true); _itemIdent[entity] = v; return v; }
+        if (item == 0) { var v = (Rarity.NonMonster, (string?)null, true, (string?)null); _itemIdent[entity] = v; return v; }
         _itemReadBudget--;
 
+        var result0 = ReadIdentityFromItem(item);
+        _itemIdent[entity] = result0;
+        return result0;
+    }
+
+    /// <summary>Read an item ENTITY's identity directly (rarity/art/identified/base-type name) — the shared
+    /// core of <see cref="ReadItemIdentity"/> without the WorldItem unwrap or per-entity cache, for callers
+    /// (ritual shop, inventory) that already hold the item entity. See the field notes inline.</summary>
+    private (Rarity, string?, bool, string?) ReadIdentityFromItem(nint item)
+    {
         // Rarity (+0x94) + Identified (+0x90) from the item's Mods component (distinct from monster
         // ObjectMagicProperties+0x144). Identified defaults true (non-uniques / no Mods comp aren't "unID").
         var rarity = Rarity.NonMonster;
@@ -525,9 +592,19 @@ public sealed class Poe2Live
             }
         }
 
-        var result = (rarity, art, identified);
-        _itemIdent[entity] = result;
-        return result;
+        // Rendered base-type display NAME (Base +0x10 → row +0x30 → UTF-16). The price key for NON-uniques:
+        // currency/runes/essences TIERS share one .dds art (Orb/Greater/Perfect → "CurrencyAddModToMagic"),
+        // so only the exact name (e.g. "Greater Orb of Augmentation") disambiguates them.
+        string? name = null;
+        var baseComp = ResolveComponent(item, "Base");
+        if (baseComp != 0)
+        {
+            var nameRow = Ptr(baseComp + Poe2.BaseComponent.NameRow);
+            var namePtr = nameRow == 0 ? 0 : Ptr(nameRow + Poe2.BaseComponent.RowDisplayName);
+            if (namePtr != 0) { var s = _reader.ReadStringUtf16(namePtr, 64); if (!string.IsNullOrWhiteSpace(s)) name = s.Trim(); }
+        }
+
+        return (rarity, art, identified, name);
     }
 
     /// <summary>"Art/2DItems/Weapons/.../Uniques/Earthbound.dds" → "Earthbound" (last path segment, no
@@ -903,6 +980,245 @@ public sealed class Poe2Live
     {
         if (!_reader.TryReadStruct<uint>(element + Poe2.UiElement.Flags, out var flags)) return false;
         return (flags & (1u << Poe2.UiElement.FlagVisibleBit)) != 0;
+    }
+
+    // ── UiElement screen geometry (GameHelper UiElementBase port; shared with Poe2Runeforge) ──────────
+
+    /// <summary>Screen-space rect (pixels) of ANY UiElement, via the GameHelper UiElementBase math:
+    /// parent-chain unscaled position × resolution scale. Same geometry as <see cref="Poe2Runeforge"/>
+    /// (sans its scroll viewport). <paramref name="winW"/>/<paramref name="winH"/> are the current game
+    /// window size. Returns false on a read failure, a degenerate (≤1 px) rect, or when the element's own
+    /// visibility bit is clear (so a render-thread caller can read live tag rects and a stale/closed tag
+    /// just drops out). Touches no per-entity cache → safe to call from a separate reader stack per frame.</summary>
+    public bool TryUiElementRect(nint el, float winW, float winH, out float x, out float y, out float w, out float h,
+        string? requireFirstLine = null)
+    {
+        x = y = w = h = 0f;
+        if (el == 0) return false;
+        if (!_reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags)) return false;
+        if ((flags & (1u << Poe2.UiElement.FlagVisibleBit)) == 0) return false;   // not (locally) visible
+        // Stale-address guard: a loot-tag element captured at world rate can be freed/recycled before this
+        // frame. Require the element to STILL show the matched first-line text; a recycled element holding
+        // unrelated UI fails this and drops out (no garbage rect → no jitter). Caller passes the matched text.
+        if (requireFirstLine is { Length: > 0 })
+        {
+            var t = ReadStdWString(el + Poe2.UiElement.Text);
+            var nl = t.IndexOf('\n');
+            if (!string.Equals((nl >= 0 ? t[..nl] : t).Trim(), requireFirstLine, StringComparison.Ordinal)) return false;
+        }
+        if (!_reader.TryReadStruct<byte>(el + Poe2.UiElement.ScaleIndex, out var idx)) return false;
+        _reader.TryReadStruct<float>(el + Poe2.UiElement.LocalScaleMul, out var mul);
+        // Size as ONE atomic 8-byte read (W,H contiguous at 0x288/0x28C) — never split into two reads, or a
+        // mid-update read tears W from one frame and H from another.
+        _reader.TryReadStruct<System.Numerics.Vector2>(el + Poe2.UiElement.SizeW, out var sz);
+        var (sw, sh) = UiScaleValue(idx, mul, winW, winH);
+        if (sw <= 0f || sh <= 0f) return false;
+        var (px, py) = UiUnscaledPos(el, 0, winW, winH);
+        if (!float.IsFinite(px) || !float.IsFinite(py)) return false;
+        x = px * sw; y = py * sh; w = sz.X * sw; h = sz.Y * sh;
+        return w > 1f && h > 1f;
+    }
+
+    /// <summary>A UiElement's RelativePos (canvas/parent-relative position) as ONE atomic 8-byte read,
+    /// VALIDATED. Used by the render thread to re-read atlas node positions per frame so the overlay tracks
+    /// pan smoothly. Returns false — so the caller falls back to the last baked position — when the element
+    /// is stale/freed/recycled (its Self pointer no longer matches: atlas nodes scrolled far off-screen can
+    /// be virtualized, and reading the freed slot yields garbage that projected to streaking lines) or when
+    /// the value is non-finite / implausibly large.</summary>
+    public bool TryRelPos(nint el, out float x, out float y)
+    {
+        x = y = 0f;
+        if (el == 0) return false;
+        // Liveness guard: a real UiElement's Self (+0x08) points back at itself; a recycled/freed slot won't.
+        if (!_reader.TryReadStruct<nint>(el + Poe2.UiElement.Self, out var self) || self != el) return false;
+        if (!_reader.TryReadStruct<System.Numerics.Vector2>(el + Poe2.UiElement.RelativePos, out var v)) return false;
+        if (!float.IsFinite(v.X) || !float.IsFinite(v.Y) || MathF.Abs(v.X) > 200000f || MathF.Abs(v.Y) > 200000f) return false;
+        x = v.X; y = v.Y; return true;
+    }
+
+    /// <summary>v1 = winW/2560, v2 = winH/1600; ScaleIndex picks which axis scale(s) apply (1→(v1,v1),
+    /// 2→(v2,v2), 3→(v1,v2), else uniform mul). Mirrors GameHelper's ScaleValue / Poe2Runeforge.</summary>
+    private static (float w, float h) UiScaleValue(byte idx, float mul, float winW, float winH)
+    {
+        if (mul == 0f) mul = 1f;
+        var v1 = winW / (float)Poe2.UiElement.BaseResW;
+        var v2 = winH / (float)Poe2.UiElement.BaseResH;
+        float w = mul, h = mul;
+        switch (idx)
+        {
+            case 1: w *= v1; h *= v1; break;
+            case 2: w *= v2; h *= v2; break;
+            case 3: w *= v1; h *= v2; break;
+        }
+        return (w, h);
+    }
+
+    /// <summary>Parent-chain accumulated UNSCALED position: relPos + parent position, plus this element's
+    /// PositionModifier when its flag <c>0x0A</c> is set. SIMPLE add (no cross-scale rescale) — this is the
+    /// form validated for loot tags by Research <c>--lootcursor</c>. (The runeforge panel's
+    /// <see cref="Poe2Runeforge"/> keeps a rescale branch, but its rows share their parents' scale so it
+    /// never fires; loot tags DO cross scale indices, where the rescale mis-positioned them.)</summary>
+    private (float x, float y) UiUnscaledPos(nint el, int depth, float winW, float winH)
+    {
+        // RelativePos as ONE atomic 8-byte read (X,Y contiguous). Splitting it into two float reads tears
+        // X from one frame and Y from the next while the game is repositioning a world-anchored loot label
+        // as the player moves — which is exactly what made the chips jitter in motion. Same idiom as the
+        // HP-bar Vector3 world read.
+        _reader.TryReadStruct<System.Numerics.Vector2>(el + Poe2.UiElement.RelativePos, out var rel);
+        var parent = Ptr(el + Poe2.UiElement.Parent);
+        if (parent == 0 || depth >= 64) return (rel.X, rel.Y);
+
+        var (ppx, ppy) = UiUnscaledPos(parent, depth + 1, winW, winH);
+
+        if (_reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags)
+            && (flags & (1u << Poe2.UiElement.FlagModifyPosBit)) != 0)
+        {
+            _reader.TryReadStruct<System.Numerics.Vector2>(el + Poe2.UiElement.PositionModifier, out var mod);
+            ppx += mod.X; ppy += mod.Y;
+        }
+        return (ppx + rel.X, ppy + rel.Y);
+    }
+
+    /// <summary>One offered reward in the post-ritual TRIBUTE SHOP: the reward item's identity (for pricing —
+    /// uniques key off <see cref="Art"/>, everything else off the base-type <see cref="Name"/>) and its tile's
+    /// SCREEN rect (already scaled). Value lookup + drawing happen overlay-side.</summary>
+    public readonly record struct RitualReward(Rarity Rarity, string? Art, string? Name, bool Identified, float X, float Y, float W, float H);
+
+    /// <summary>Read the post-ritual tribute shop's offered rewards (full item entities) so the overlay can
+    /// price each. The reward tiles are item-slot UiElements carrying their item Entity at
+    /// <see cref="Poe2Offsets.Ritual.TileSlotItem"/> (+0x4F8); ALL are present with no hover. Returns empty
+    /// when the shop is closed — gated on a shop-signature text element, so it's cheap when not shopping.
+    /// World thread (resolves item components via the per-area cache). See the ritual-rewards RE notes.</summary>
+    public List<RitualReward> ReadRitualRewards(nint inGameState, float winW, float winH)
+    {
+        var result = new List<RitualReward>();
+        var uiRoot = Ptr(inGameState + Poe2.InGameState.UiRoot);
+        if (uiRoot == 0) return result;
+        const uint visBit = 1u << Poe2.UiElement.FlagVisibleBit;
+
+        // 1) Confirm the shop is open + find a signature text element. BFS the VISIBLE tree (invisible
+        //    subtrees pruned → cheap); the signature only renders while the tribute shop is up.
+        nint sigEl = 0;
+        var queue = new Queue<nint>(); queue.Enqueue(uiRoot);
+        var visited = new HashSet<nint>();
+        while (queue.Count > 0 && visited.Count < 20000)
+        {
+            var el = queue.Dequeue();
+            if (el == 0 || !visited.Add(el)) continue;
+            var visible = _reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags) && (flags & visBit) != 0;
+            if (!visible && el != uiRoot) continue;             // prune invisible subtree
+            if (ChildSpan(el, out var f, out var nn))
+                for (long k = 0; k < nn; k++) queue.Enqueue(Ptr(f + (nint)(k * 8)));
+            if (sigEl == 0)
+            {
+                var t = ReadStdWString(el + Poe2.UiElement.Text);
+                if (t.Length >= 6 && (t.Contains("Rituals Remaining", StringComparison.OrdinalIgnoreCase)
+                                      || t.Contains("tribute to the king", StringComparison.OrdinalIgnoreCase)))
+                    sigEl = el;
+            }
+        }
+        if (sigEl == 0) return result;   // shop closed
+
+        // 2) Walk UP from the signature element; at each ancestor look among its DIRECT children for the
+        //    reward grid (a container of item-slot tiles). Grid + signature share the shop-window ancestor;
+        //    the flask bar — the only other multi-slot item grid — is NOT under that window, so it's excluded.
+        var cur = sigEl;
+        nint grid = 0;
+        for (var up = 0; up < 8 && grid == 0; up++)
+        {
+            grid = FindRewardGrid(cur);
+            var parent = Ptr(cur + Poe2.UiElement.Parent);
+            if (parent == 0) break;
+            cur = parent;
+        }
+        if (grid == 0 || !ChildSpan(grid, out var gf, out var gn)) return result;
+
+        // 3) Read each tile's item entity (+0x4F8) → identity, and its live screen rect.
+        for (long i = 0; i < gn; i++)
+        {
+            var tile = Ptr(gf + (nint)(i * 8));
+            var item = TileItem(tile);
+            if (item == 0) continue;
+            var (rarity, art, identified, name) = ReadIdentityFromItem(item);
+            if (!TryUiElementRect(tile, winW, winH, out var x, out var y, out var w, out var h)) continue;
+            result.Add(new RitualReward(rarity, art, name, identified, x, y, w, h));
+        }
+        return result;
+    }
+
+    /// <summary>A reward-grid container among <paramref name="parent"/>'s DIRECT children: the child whose
+    /// own children are mostly item-slot tiles (item entity at +0x4F8). Returns the best (≥2 tiles) or 0.</summary>
+    private nint FindRewardGrid(nint parent)
+    {
+        if (!ChildSpan(parent, out var first, out var n)) return 0;
+        nint best = 0; var bestItems = 0;
+        for (long i = 0; i < n; i++)
+        {
+            var c = Ptr(first + (nint)(i * 8));
+            if (!ChildSpan(c, out var cf, out var cn) || cn is < 1 or > 16) continue;
+            var items = 0;
+            for (long k = 0; k < cn; k++) if (TileItem(Ptr(cf + (nint)(k * 8))) != 0) items++;
+            if (items >= 2 && items > bestItems && items * 2 >= cn) { best = c; bestItems = items; }
+        }
+        return best;
+    }
+
+    /// <summary>The item Entity held by an item-slot tile (+0x4F8), or 0 when empty / not an item element
+    /// (validated by requiring a RenderItem component).</summary>
+    private nint TileItem(nint tile)
+    {
+        if (tile == 0) return 0;
+        var item = Ptr(tile + Poe2.Ritual.TileSlotItem);
+        return item != 0 && ResolveComponent(item, "RenderItem") != 0 ? item : 0;
+    }
+
+    private bool ChildSpan(nint el, out nint first, out long n)
+    {
+        first = Ptr(el + Poe2.UiElement.Children); n = 0;
+        if (first == 0) return false;
+        if (!_reader.TryReadStruct<nint>(el + Poe2.UiElement.ChildrenEnd, out var last)) return false;
+        n = ((long)last - (long)first) / 8;
+        return n is > 0 and <= 4000;
+    }
+
+    /// <summary>BFS the in-game UI tree (from <see cref="Poe2Offsets.InGameState.UiRoot"/>) for VISIBLE,
+    /// text-bearing elements and return each one's address + the FIRST LINE of its text. Invisible subtrees
+    /// are PRUNED (the game won't render their children either), so the walk stays cheap — typically a few
+    /// hundred visible nodes rather than the whole tree. The caller matches each first line to a priced item
+    /// by NAME — a loot tag's text IS the item name, so no item-entity link is needed — and reads the live
+    /// rect via <see cref="TryUiElementRect"/>. Empty when not in game. Bounded by <paramref name="maxNodes"/>.
+    /// Allocates a fresh list/queue/set per call → meant to run THROTTLED on the world thread, not per frame.</summary>
+    public List<(nint El, string Text)> ScanLootLabels(nint inGameState, int maxNodes = 20000)
+    {
+        var result = new List<(nint, string)>();
+        var uiRoot = Ptr(inGameState + Poe2.InGameState.UiRoot);
+        if (uiRoot == 0) return result;
+        const uint visBit = 1u << Poe2.UiElement.FlagVisibleBit;
+
+        var queue = new Queue<nint>(); queue.Enqueue(uiRoot);
+        var visited = new HashSet<nint>();
+        while (queue.Count > 0 && visited.Count < maxNodes)
+        {
+            var el = queue.Dequeue();
+            if (el == 0 || !visited.Add(el)) continue;
+            var visible = _reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags) && (flags & visBit) != 0;
+            if (!visible && el != uiRoot) continue;   // prune the invisible subtree (root always descended)
+
+            var first = Ptr(el + Poe2.UiElement.Children);
+            if (first != 0 && _reader.TryReadStruct<nint>(el + Poe2.UiElement.ChildrenEnd, out var last))
+            {
+                var n = ((long)last - (long)first) / 8;
+                if (n is > 0 and <= 8192)
+                    for (long k = 0; k < n; k++) queue.Enqueue(Ptr(first + (nint)(k * 8)));
+            }
+
+            var text = ReadStdWString(el + Poe2.UiElement.Text);
+            if (text.Length < 2) continue;
+            var nl = text.IndexOf('\n');
+            var firstLine = (nl >= 0 ? text[..nl] : text).Trim();
+            if (firstLine.Length >= 2) result.Add((el, firstLine));
+        }
+        return result;
     }
 
     // ── internals ───────────────────────────────────────────────────────────

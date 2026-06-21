@@ -128,7 +128,12 @@ public sealed class OverlayRenderer : IDisposable
             // Rune-crafting reward prices: screen-space labels drawn on top of whatever's below (radar
             // or atlas), gated only on the panel being open (RuneLabels populated). No-op otherwise.
             if (ctx.Active && ctx.InGame)
+            {
                 DrawRuneforge(rt, ctx);
+                DrawRitualRewards(rt, ctx);            // value chips on the ritual tribute-shop tiles (screen-space)
+                DrawLootTags(rt, ctx);                 // value chips on the game's own loot tags (screen-space)
+                DrawMonolithPanel(rt, ctx);            // nearby-monolith reward list (screen-space)
+            }
         }
         finally { rt.EndDraw(); }
         _window.Present();
@@ -143,7 +148,9 @@ public sealed class OverlayRenderer : IDisposable
     private void DrawAtlasRoute(ID2D1RenderTarget rt, RenderContext ctx)
     {
         var start = ctx.AtlasStart; var end = ctx.AtlasEnd; var route = ctx.AtlasRoute;
-        if (start is null && end is null && (route is null || route.Count == 0)) return;
+        var autos = ctx.AtlasAutoRoutes; var current = ctx.AtlasCurrent;
+        bool hasAuto = autos is { Count: > 0 };
+        if (start is null && end is null && (route is null || route.Count == 0) && !hasAuto && current is null) return;
         float h0 = ctx.AtlasScale, h1 = ctx.AtlasShearX, h2 = ctx.AtlasOffX,
               h3 = ctx.AtlasShearY, h4 = ctx.AtlasScaleY, h5 = ctx.AtlasOffY,
               h6 = ctx.AtlasPersX, h7 = ctx.AtlasPersY;
@@ -153,6 +160,28 @@ public sealed class OverlayRenderer : IDisposable
         var bright = new Color4(0.235f, 0.86f, 1f, 0.95f);   // cyan
         var green = new Color4(0.43f, 0.91f, 0.53f, 1f);
         var gold = new Color4(0.878f, 0.702f, 0.255f, 1f);
+
+        // ── Auto-routes (improvement 1): one polyline per tracked tile, in its rule colour, with a hop chip
+        // at the target. Drawn UNDER the manual F10 route + the marks. ──
+        if (hasAuto)
+        {
+            foreach (var ar in autos!)
+            {
+                if (ar.Points is not { Count: >= 2 } rp) continue;
+                // Softer + thinner than the manual F10 route: auto-routes are ambient guides to every tracked
+                // tile, so they shouldn't dominate the screen as a thick web. Lower alpha + lighter underlay.
+                var col = string.IsNullOrEmpty(ar.Color) ? new Color4(0.235f, 0.86f, 1f, 0.65f) : ParseColor(ar.Color, 0.65f);
+                var pts = new NumVec2[rp.Count];
+                for (var i = 0; i < rp.Count; i++) pts[i] = Proj(rp[i]);
+                _bStyle!.Color = new Color4(0f, 0f, 0f, 0.4f); for (var i = 1; i < pts.Length; i++) rt.DrawLine(pts[i - 1], pts[i], _bStyle, 3f);
+                _bStyle.Color = col; for (var i = 1; i < pts.Length; i++) rt.DrawLine(pts[i - 1], pts[i], _bStyle, 1.75f);
+                // Hop-count chip at the target end.
+                var tgt = pts[^1];
+                string ht = ar.Hops.ToString();
+                rt.FillRectangle(new Vortice.RawRectF(tgt.X - 11f, tgt.Y - 26f, tgt.X + 11f, tgt.Y - 10f), _bPanel!);
+                rt.DrawText(ht, _tf!, new Rect(tgt.X - 9f, tgt.Y - 26f, tgt.X + 11f, tgt.Y - 10f), _bText!, DrawTextOptions.Clip);
+            }
+        }
 
         if (route is { Count: >= 2 })
         {
@@ -174,6 +203,17 @@ public sealed class OverlayRenderer : IDisposable
         // START (green disc) + END (gold ring) markers — drawn whenever set, even before a path exists.
         if (start is { } s) { var p = Proj(s); _bStyle!.Color = green; rt.DrawEllipse(new Ellipse(p, 8f, 8f), _bStyle, 3f); rt.DrawEllipse(new Ellipse(p, 3f, 3f), _bStyle, 2f); }
         if (end is { } e) { var p = Proj(e); _bStyle!.Color = gold; rt.DrawEllipse(new Ellipse(p, 11f, 11f), _bStyle, 3f); rt.DrawEllipse(new Ellipse(p, 4f, 4f), _bStyle, 2f); }
+
+        // "YOU ARE HERE" — the player's current atlas node (improvement 1): a cyan double-ring with a dark
+        // outline + filled centre so it reads as the route origin regardless of the tile underneath.
+        if (current is { } cur)
+        {
+            var p = Proj(cur);
+            _bStyle!.Color = new Color4(0f, 0f, 0f, 0.7f); rt.DrawEllipse(new Ellipse(p, 11f, 11f), _bStyle, 4.5f);
+            _bStyle.Color = new Color4(0.3f, 0.95f, 1f, 1f);
+            rt.DrawEllipse(new Ellipse(p, 11f, 11f), _bStyle, 2.5f);
+            rt.FillEllipse(new Ellipse(p, 3f, 3f), _bStyle);
+        }
     }
 
     /// <summary>
@@ -207,12 +247,17 @@ public sealed class OverlayRenderer : IDisposable
             }
 
             var c = new NumVec2(sx, sy);
-            if (n.Selected || n.Arrow)
+            if (n.Selected || n.Arrow || n.Nav)
             {
-                // Tracked / arrowed map on-screen → ring in its rule's category colour.
+                // ONE clean ring in the rule colour (Citadel gold / Boss red / …) + a small filled centre.
+                // Biome (when enabled) is conveyed by the CENTRE-DOT colour rather than a second full ring,
+                // so a tracked node reads as a single target instead of a stack of concentric rings. Primary
+                // targets (ring/arrow rules) are drawn a touch larger than nav-only route endpoints.
+                var r = (n.Selected || n.Arrow) ? 12f : 9f;
                 _bStyle!.Color = col;
-                rt.DrawEllipse(new Ellipse(c, 18f, 18f), _bStyle, 3f);
-                rt.DrawEllipse(new Ellipse(c, 9f, 9f), _bStyle, 2f);
+                rt.DrawEllipse(new Ellipse(c, r, r), _bStyle, 2.5f);
+                _bStyle.Color = ctx.AtlasBiomeBorder ? BiomeColor(n.Biome) : col;
+                rt.FillEllipse(new Ellipse(c, 3f, 3f), _bStyle);
             }
             else if (n.IconType > 0) // DEBUG (AtlasDrawAll): content-tag element
             {
@@ -233,9 +278,37 @@ public sealed class OverlayRenderer : IDisposable
             }
             var label = n.Label ?? (n.IconType > 0 ? n.IconType.ToString() : null);
             if (label != null)
-                rt.DrawText(label, _tf!, new Rect(sx + 11f, sy - 9f, sx + 220f, sy + 11f), _bText!, DrawTextOptions.Clip);
+            {
+                // Backing chip behind the label (improvement 2) so map names stay readable over the busy
+                // atlas art. Width is estimated from the label length (Direct2D layout measuring is heavier
+                // than it's worth here); the chip sits just right of the ring.
+                float lx = sx + 24f, ly = sy - 9f;
+                float lw = label.Length * 7.0f + 8f;
+                rt.FillRectangle(new Vortice.RawRectF(lx - 4f, ly - 1f, lx + lw, ly + 17f), _bPanel!);
+                rt.DrawText(label, _tf!, new Rect(lx, ly, lx + lw + 40f, ly + 18f), _bText!, DrawTextOptions.Clip);
+            }
         }
     }
+
+    // Atlas biome index (0..12) → border colour (improvement 2). Order matches the dashboard BIOMES list:
+    // Grass, Sand, Swamp, Forest, Snow, Stone, Volcanic, Coast, Cave, Vaal, Water, Desert, Special.
+    private static readonly Color4[] BiomeColors =
+    {
+        new(0.45f, 0.78f, 0.36f, 1f), // 0 Grass
+        new(0.85f, 0.74f, 0.36f, 1f), // 1 Sand
+        new(0.40f, 0.62f, 0.35f, 1f), // 2 Swamp
+        new(0.22f, 0.55f, 0.30f, 1f), // 3 Forest
+        new(0.80f, 0.86f, 0.92f, 1f), // 4 Snow
+        new(0.62f, 0.60f, 0.58f, 1f), // 5 Stone
+        new(0.86f, 0.40f, 0.25f, 1f), // 6 Volcanic
+        new(0.38f, 0.70f, 0.82f, 1f), // 7 Coast
+        new(0.55f, 0.45f, 0.65f, 1f), // 8 Cave
+        new(0.80f, 0.30f, 0.40f, 1f), // 9 Vaal
+        new(0.30f, 0.55f, 0.85f, 1f), // 10 Water
+        new(0.88f, 0.78f, 0.45f, 1f), // 11 Desert
+        new(0.75f, 0.55f, 0.85f, 1f), // 12 Special
+    };
+    private static Color4 BiomeColor(int b) => (b >= 0 && b < BiomeColors.Length) ? BiomeColors[b] : new Color4(0.6f, 0.6f, 0.6f, 1f);
 
     /// <summary>Draw an edge arrow pointing from screen-centre toward an OFF-SCREEN atlas map (sx,sy), so
     /// you can pan toward high-value maps you can't zoom out far enough to see. Clamped to a screen-edge
@@ -260,8 +333,14 @@ public sealed class OverlayRenderer : IDisposable
         rt.DrawLine(bl, br, _bStyle, 4f);              // close the arrowhead triangle
         if (label != null)
         {
-            float lx = ex - ux * 56f, ly = ey - uy * 18f;
-            rt.DrawText(label, _tf!, new Rect(lx - 95f, ly - 8f, lx + 95f, ly + 10f), _bText!, DrawTextOptions.Clip);
+            // Pull the label fully on-screen (inset from the arrow toward centre) and back it with a chip so
+            // it stays readable over the map art and doesn't clip off the edge like the bare text did.
+            float lw = label.Length * 7.0f + 8f;
+            float lx = ex - ux * 30f - lw * 0.5f, ly = ey - uy * 22f - 9f;
+            lx = Math.Clamp(lx, 2f, W - lw - 2f);
+            ly = Math.Clamp(ly, 2f, H - 20f);
+            rt.FillRectangle(new Vortice.RawRectF(lx - 3f, ly - 1f, lx + lw, ly + 17f), _bPanel!);
+            rt.DrawText(label, _tf!, new Rect(lx, ly, lx + lw + 40f, ly + 18f), _bText!, DrawTextOptions.Clip);
         }
     }
 
@@ -381,10 +460,109 @@ public sealed class OverlayRenderer : IDisposable
         }
     }
 
+    /// <summary>Ritual tribute-shop reward values: a value chip centered on the bottom edge of each reward
+    /// tile in the open shop. Rects are screen-space (already scaled in Poe2Live.ReadRitualRewards); text +
+    /// tier color are precomputed in RadarApp. High-value rewards get a gold border. No world projection.</summary>
+    private void DrawRitualRewards(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (ctx.RitualRewards is not { Count: > 0 } labels) return;
+        const float boxH = 20f;
+        foreach (var r in labels)
+        {
+            var boxW = MathF.Max(44f, 7.5f * (r.Text.Length + 1));
+            var cx = r.X + r.W * 0.5f;
+            var top = r.Y + r.H - boxH;            // sit on the tile's bottom edge
+            var box = new Vortice.RawRectF(cx - boxW * 0.5f, top, cx + boxW * 0.5f, top + boxH);
+            rt.FillRectangle(box, _bPanel!);
+            if (r.Highlight) { _bStyle!.Color = ColItemHi; rt.DrawRectangle(box, _bStyle, 2f); }
+            _bStyle!.Color = ColorFromU(r.Color);
+            rt.DrawText(r.Text, _tf!, new Rect(box.Left + 3f, top + 1f, box.Right - 2f, top + boxH - 1f),
+                _bStyle, DrawTextOptions.Clip);
+        }
+    }
+
+    /// <summary>Value chips drawn ON the game's own loot tags. Each rect is the tag's LIVE screen rect
+    /// (from Poe2Live.TryUiElementRect, re-read per frame in RadarApp) — game-computed, so the chip tracks
+    /// the tag exactly with no world projection and no jitter. Covers items the game already names (currency,
+    /// runes, essences, fragments, identified uniques); unidentified uniques use the world-projected reveal
+    /// in DrawItemLabels. High-value matches get a gold border (same palette as the item labels).</summary>
+    private void DrawLootTags(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (ctx.LootTags is not { Count: > 0 } labels) return;
+        const float gap = 6f, boxH = 18f;
+        foreach (var t in labels)
+        {
+            var lx = t.X + t.W + gap;             // just past the tag's right edge
+            var cy = t.Y + t.H * 0.5f;            // vertically centered on the tag
+            var boxW = MathF.Max(40f, 7.5f * (t.Value.Length + 1));
+            var box = new Vortice.RawRectF(lx, cy - boxH * 0.5f, lx + boxW, cy + boxH * 0.5f);
+            rt.FillRectangle(box, _bPanel!);
+            if (t.Highlight) { _bStyle!.Color = ColItemHi; rt.DrawRectangle(box, _bStyle, 2f); }
+            _bStyle!.Color = t.Highlight ? ColItemHi : ColItemText;
+            rt.DrawText(t.Value, _tf!, new Rect(lx + 4f, cy - boxH * 0.5f + 1f, lx + boxW - 2f, cy + boxH * 0.5f - 1f),
+                _bStyle, DrawTextOptions.Clip);
+        }
+    }
+
     /// <summary>Unpack a 0xAARRGGBB color (precomputed in RadarApp.BuildHpSpecs) to a Color4 — no string
     /// parse or allocation, runs per bar per frame.</summary>
     private static Color4 ColorFromU(uint u)
         => new(((u >> 16) & 0xFF) / 255f, ((u >> 8) & 0xFF) / 255f, (u & 0xFF) / 255f, ((u >> 24) & 0xFF) / 255f);
+
+    /// <summary>Runeshape-monolith map markers: a value-coloured ring with the hole count N inside, and a
+    /// "{best} ex · {reward}" label to the right. Drawn on the big map (grid → screen via the same
+    /// projection as entity dots / landmarks). Augments the generic POI dot with the monolith's value.</summary>
+    private void DrawMonoliths(ID2D1RenderTarget rt, RenderContext ctx, NumVec2 player, NumVec2 center, float scale)
+    {
+        if (ctx.Monoliths is not { Count: > 0 } monos) return;
+        foreach (var m in monos)
+        {
+            var p = Project(new NumVec2(m.Grid.X, m.Grid.Y), player, center, scale);
+            _bStyle!.Color = ColorFromU(m.Color);
+            rt.DrawEllipse(new Ellipse(p, 9f, 9f), _bStyle, 2.4f);          // value-coloured ring
+            rt.DrawText(m.Holes.ToString(), _tf!,                           // N badge (white) inside the ring
+                new Rect(p.X - 4f, p.Y - 8f, p.X + 10f, p.Y + 8f), _bText!, DrawTextOptions.Clip);
+            var label = m.BestEx > 0 ? $"{m.BestEx:F0}ex · {m.BestName}" : $"{m.AnchorName} {m.Holes}h";
+            rt.DrawText(label, _tf!, new Rect(p.X + 13f, p.Y - 8f, p.X + 340f, p.Y + 9f), _bStyle, DrawTextOptions.Clip);
+        }
+    }
+
+    /// <summary>The nearby-monolith reward panel: a screen-space list (top-right) of the area's monoliths
+    /// sorted by best value, each with its anchor + N + top priced rewards. Draws even with the big map
+    /// closed (the values are read area-wide off the persistent devices).</summary>
+    private void DrawMonolithPanel(ID2D1RenderTarget rt, RenderContext ctx)
+    {
+        if (!ctx.ShowMonolithPanel || ctx.Monoliths is not { Count: > 0 } monos) return;
+        var list = monos.OrderByDescending(m => m.BestEx).Take(6).ToList();
+        const float w = 248f, pad = 6f, lineH = 15f, headH = 17f, titleH = 18f;
+
+        float h = pad * 2f + titleH;
+        foreach (var m in list)
+        {
+            var rows = 0; foreach (var r in m.Rewards) if (r.Ex > 0 && rows < 3) rows++;
+            h += headH + lineH * rows;
+        }
+        float x = ctx.WindowWidth - w - 10f, y = 90f;
+        rt.FillRectangle(new Vortice.RawRectF(x, y, x + w, y + h), _bPanel!);
+
+        float cy = y + pad;
+        rt.DrawText($"Monoliths ({monos.Count})", _tf!, new Rect(x + pad, cy, x + w - pad, cy + titleH), _bText!, DrawTextOptions.Clip);
+        cy += titleH;
+        foreach (var m in list)
+        {
+            _bStyle!.Color = ColorFromU(m.Color);
+            var hdr = m.BestEx > 0 ? $"{m.BestEx:F0}ex · {m.AnchorName} {m.Holes}h" : $"{m.AnchorName} {m.Holes}h";
+            rt.DrawText(hdr, _tf!, new Rect(x + pad, cy, x + w - pad, cy + headH), _bStyle, DrawTextOptions.Clip);
+            cy += headH;
+            var shown = 0;
+            foreach (var r in m.Rewards)
+            {
+                if (r.Ex <= 0 || shown >= 3) continue;
+                rt.DrawText($"  {r.Ex,4:F0}  {r.Name}", _tf!, new Rect(x + pad, cy, x + w - pad, cy + lineH), _bText!, DrawTextOptions.Clip);
+                cy += lineH; shown++;
+            }
+        }
+    }
 
     /// <summary>
     /// Draw-only guidance routes rendered on the WORLD GROUND, shown when the big map is CLOSED.
@@ -599,6 +777,9 @@ public sealed class OverlayRenderer : IDisposable
         // own legend color (precomputed by RadarApp). Drawn whenever a target is selected (selecting =
         // intent to navigate); not gated on ShowPath.
         DrawPaths(rt, ctx, player, center, scale);
+
+        // Runeshape monoliths: value-coloured ring + N badge + value/reward label.
+        DrawMonoliths(rt, ctx, player, center, scale);
 
         // Player blip on top (toggleable — some prefer no self-marker).
         if (ctx.ShowPlayerBlip)

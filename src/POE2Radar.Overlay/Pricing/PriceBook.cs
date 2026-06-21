@@ -43,17 +43,23 @@ public readonly record struct PriceResult(string Name, double Exalted, int Quant
 /// </summary>
 public sealed class PriceBook
 {
-    // poe.ninja "stash item" unique types (icon → art basename + price inline per line).
+    // poe.ninja "stash item" overview types (icon → art basename + price inline per line). Mostly
+    // uniques, plus PrecursorTablets (the atlas/tower tablets — Overseer/Breach/Ritual/… Tablet), which
+    // share this endpoint's shape rather than the exchange one.
     private static readonly string[] UniqueTypes =
-        { "UniqueWeapons", "UniqueArmours", "UniqueAccessories", "UniqueFlasks", "UniqueJewels", "UniqueTablets" };
+        { "UniqueWeapons", "UniqueArmours", "UniqueAccessories", "UniqueFlasks", "UniqueJewels",
+          "UniqueTablets", "PrecursorTablets" };
 
     // poe.ninja "exchange" currency-like types. Superset of the old poe2scout set — includes
     // SoulCores (poe2scout's "ultimatum"), UncutGems (Uncut Skill/Spirit/Support Gem by level) and
     // LineageSupportGems (named, tradeable). NOTE: individual CUT active skill gems (e.g. "Rain of
     // Blades") are not a traded market on poe.ninja or anywhere — only UncutGems carry a value.
+    // "Verisium" is the Expedition-2 / rune-crafting currency family (Runes of Aldur): the Alloys
+    // (Mystic/Prismatic/Swift/Runic/… Alloy), Verisium, Starlit Ores, and Crests — the runeforge reward
+    // pool. Without it those rewards have no price and draw no overlay label.
     private static readonly string[] ExchangeTypes =
-        { "Currency", "Runes", "Fragments", "Essences", "Expedition", "Breach", "Ritual", "Delirium",
-          "UncutGems", "Abyss", "SoulCores", "LineageSupportGems", "Idols" };
+        { "Currency", "Runes", "Fragments", "Essences", "Expedition", "Verisium", "Breach", "Ritual",
+          "Delirium", "UncutGems", "Abyss", "SoulCores", "LineageSupportGems", "Idols" };
 
     private const string NinjaExchange = "https://poe.ninja/poe2/api/economy/exchange/current/overview";
     private const string NinjaStashItem = "https://poe.ninja/poe2/api/economy/stash/current/item/overview";
@@ -247,7 +253,7 @@ public sealed class PriceBook
                 var item = new PricedItem(m.Name.Trim(), ex, qty, type);
                 Upsert(byName, Normalize(m.Name), item);
                 var art = ArtBasenameFromIcon(m.Image);
-                if (art != null) Upsert(byArt, art, item);
+                if (art != null) Upsert(byArt, art, item, preferVolume: true);
             }
         }
         catch { /* a missing/empty category is fine — skip it */ }
@@ -273,17 +279,24 @@ public sealed class PriceBook
                 var item = new PricedItem(ln.Name.Trim(), ex, ln.ListingCount ?? 0, type);
                 Upsert(byName, Normalize(ln.Name), item);
                 var art = ArtBasenameFromIcon(ln.Icon);
-                if (art != null) Upsert(byArt, art, item);
+                if (art != null) Upsert(byArt, art, item, preferVolume: true);
             }
         }
         catch { }
     }
 
-    // Keep the higher-value listing on a key collision (shared art across variants → show the best).
-    private static void Upsert(Dictionary<string, PricedItem> map, string key, PricedItem item)
+    /// <summary>Insert/replace on a key collision. By NAME (unique keys) keep the higher value. By ART,
+    /// currency TIERS share one icon (Exalted/Greater/Perfect Exalted → same "CurrencyAddModToRare" art),
+    /// so keeping the most VALUABLE made every plain Exalted inherit Perfect Exalted's price — instead keep
+    /// the MOST-TRADED listing (<paramref name="preferVolume"/>), which is the common drop.</summary>
+    private static void Upsert(Dictionary<string, PricedItem> map, string key, PricedItem item, bool preferVolume = false)
     {
         if (string.IsNullOrEmpty(key)) return;
-        if (!map.TryGetValue(key, out var cur) || item.Exalted > cur.Exalted) map[key] = item;
+        if (!map.TryGetValue(key, out var cur)) { map[key] = item; return; }
+        var replace = preferVolume
+            ? item.Quantity > cur.Quantity || (item.Quantity == cur.Quantity && item.Exalted > cur.Exalted)
+            : item.Exalted > cur.Exalted;
+        if (replace) map[key] = item;
     }
 
     /// <summary>poe.ninja icon → basename. ".../<hash>/Earthbound.png" → "Earthbound" (handles both the
