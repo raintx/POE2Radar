@@ -15,20 +15,35 @@ quality-of-life feature.
 - **Map overlay** — when the in-game map is open, draws the walkable-terrain mask + entity dots,
   projected player-centered onto the game's map.
 - **Entity radar** — alive enemies (red), NPCs, chests, area transitions, other players, and
-  **POIs** (anything the game flags with a minimap icon) shown with a ring.
+  **POIs** (anything the game flags with a minimap icon) shown with a ring. Optional world-space
+  **HP bars** over monsters.
 - **Tile landmarks** — static features pulled from terrain tile data (boss arenas, area
   transitions, …), shown the moment you enter an area, with community-curated friendly names.
+- **Atlas overlay** — on the open Atlas, highlights and labels nodes by content/map type, draws
+  off-screen arrows to tracked maps, and auto-routes: shortest-hop route lines from where you are
+  to every tracked tile, with hop counts. Track boss tiers (Deadly, Twinned, …), special maps
+  (Citadels, Towers, Unique maps), and any content type; biome-coloured borders on tracked labels.
+- **Loot values** — prices dropped items from poe.ninja and draws the value on the drop / its loot
+  tag, including revealing what **unidentified uniques** are. Filter by category and value floor.
+- **League reward values** — see what a reward is worth before you commit: value chips on every
+  **Ritual** tribute-shop tile, a **Runeshape monolith's** best reward and rune count shown on the
+  map *before* you open it, and prices on the **Runeforge** (Runeshape Combinations) panel.
+- **Monster threat detection** — flags dangerous rare/magic monster mods and auras.
 - **Navigation** — pick any landmark, POI, or entity as a destination and the overlay draws a
   smoothed A* route to it: on the in-game map when it's open, or as waypoints on the world ground
   when it's closed. Multi-select (each route its own color). Auto-nav patterns (e.g. the expedition
   encounter) re-acquire their target automatically in each new zone.
-- **Auto-flask** (opt-in input) — presses the life/mana flask key below a HP/mana threshold.
-  Hard-gated: only when PoE2 is the foreground window, with cooldowns and an **F8 kill-switch**.
+- **Customizable icons & display rules** — per-rule icon shape/color/size/opacity, editable live in
+  the dashboard; drop your own `*.svg` into the `icons/` folder next to the exe to add or override
+  any icon.
+- **Auto-flask** (opt-in input) — presses the life/mana flask key below a Life, Energy Shield, or
+  mana threshold (selectable). Hard-gated: only when PoE2 is the foreground window, with cooldowns
+  and an **F8 kill-switch**.
 - **Web dashboard** (`http://localhost:7777`, or **F12** in-game) — a local control panel: a
-  searchable list of every entity/landmark you can click to navigate to, plus a settings tab
-  (radar display toggles, monster HP-bar visibility, map calibration, auto-flask tuning). Served
-  same-origin only; setting/navigation writes are loopback-gated. Read endpoints: `GET /state`,
-  `/entities`, `/landmarks`.
+  searchable list of every entity/landmark you can click to navigate to, plus settings tabs (radar
+  display + icon styling, monster HP bars, atlas tracking, loot-value pricing/league, monster-mod
+  rules, auto-flask tuning). Served same-origin only; setting/navigation writes are loopback-gated.
+  Read endpoints: `GET /state`, `/entities`, `/landmarks`, `/api/icons`.
 
 ## Download (no build required)
 
@@ -59,8 +74,9 @@ To **exit**: right-click the **POE2Radar system-tray icon → Exit**, or press *
 console window).
 
 Hotkeys: **F8** toggles auto-flask; **F9** quits; **F12** opens the web dashboard; **F6** routes to
-the nearest landmark/POI and **F7** clears routes. Map calibration and all other settings live in
-the dashboard (there are no calibration hotkeys, to avoid accidental presses).
+the nearest landmark/POI and **F7** clears routes; **F10** (with the Atlas open) inspects the
+hovered tile and sets a route start/end. All other settings live in the dashboard (no calibration
+hotkeys, to avoid accidental presses).
 
 ## Architecture
 
